@@ -83,7 +83,9 @@ for (let i = 1; i <= MAX_SALAS; i++) {
         cartitasRonda: [],
         ultimaCarta: null,
         todos_limpian: 0,
-        juegoIniciado: false
+        juegoIniciado: false,
+        turnoActual: 0, // Índice del jugador al que le toca
+        ordenJugadores: [] // Array con los socket IDs en orden de turno
     });
 }
 
@@ -161,9 +163,9 @@ io.on('connection', (socket) => {
         // Confirmar al jugador que se unió
         socket.emit("sala_unida", { salaId: salaId, nombre: sala.nombre });
         
-        // Si hay 4 jugadores, iniciar juego
+        // Si hay 4 jugadores, iniciar juego (con pequeño delay para asegurar que el cuarto jugador reciba todo)
         if (sala.users.size === 4) {
-            iniciarJuego(sala);
+            setTimeout(() => iniciarJuego(sala), 500);
         }
     });
     
@@ -175,6 +177,10 @@ io.on('connection', (socket) => {
         let arrayCartitas = repartirCartas();
         let i = 0;
         
+        // Guardar orden de jugadores para los turnos
+        sala.ordenJugadores = Array.from(sala.users.keys());
+        sala.turnoActual = 0;
+        
         sala.users.forEach((valor, clave) => {
             valor.cartas = arrayCartitas[i];
             i++;
@@ -183,7 +189,11 @@ io.on('connection', (socket) => {
         sala.ultimaCarta = arrayCartitas[3][4];
         const usersArray = Array.from(sala.users);
         
-        io.to(sala.id).emit("start_game", usersArray, sala.ultimaCarta);
+        // Determinar quién tiene el primer turno (el primero en el orden)
+        const primerTurno = sala.ordenJugadores[0];
+        const primerJugador = sala.users.get(primerTurno);
+        
+        io.to(sala.id).emit("start_game", usersArray, sala.ultimaCarta, primerTurno, primerJugador ? primerJugador.nombre : '');
         
         const usersJSON = JSON.stringify(Array.from(sala.users.entries()));
         io.to(sala.id).emit('usuariosJSON', usersJSON);
@@ -194,6 +204,14 @@ io.on('connection', (socket) => {
         if (!salaActual) return;
         const sala = salas.get(salaActual);
         if (!sala) return;
+        
+        // Verificar si es el turno del jugador
+        const jugadorActualId = sala.ordenJugadores[sala.turnoActual];
+        if (jugador !== jugadorActualId) {
+            const turnoDe = sala.users.get(jugadorActualId);
+            socket.emit("error_turno", `No es tu turno. Le toca a: ${turnoDe ? turnoDe.nombre : 'Otro jugador'}`);
+            return;
+        }
         
         // Verificar si ya jugó en esta ronda
         const jugadorYaJugo = sala.cartasRonda.some((jugada) => jugada.jugador === jugador);
@@ -216,12 +234,28 @@ io.on('connection', (socket) => {
         sala.cartitasRonda.push(carta);
         io.to(salaActual).emit("mostrar_cartas_mesa", sala.cartitasRonda);
         
+        // Avanzar turno
+        sala.turnoActual = (sala.turnoActual + 1) % 4;
+        const siguienteTurnoId = sala.ordenJugadores[sala.turnoActual];
+        const siguienteJugador = sala.users.get(siguienteTurnoId);
+        
         // Si todos jugaron, calcular ganador
         if (sala.cartasRonda.length === 4) {
             const ganador_ronda = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
             io.to(salaActual).emit("fin_ronda", ganador_ronda);
             sala.cartasRonda = [];
             sala.cartitasRonda = [];
+            // El ganador empieza la siguiente ronda
+            const ganadorIndex = sala.ordenJugadores.indexOf(ganador_ronda.jugador);
+            if (ganadorIndex !== -1) {
+                sala.turnoActual = ganadorIndex;
+                const nuevoTurno = sala.ordenJugadores[sala.turnoActual];
+                const nuevoJugador = sala.users.get(nuevoTurno);
+                io.to(salaActual).emit("cambio_turno", nuevoTurno, nuevoJugador ? nuevoJugador.nombre : '');
+            }
+        } else {
+            // Notificar a todos de quién es el siguiente turno
+            io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
         }
     });
     
@@ -243,9 +277,19 @@ io.on('connection', (socket) => {
         if (salaActual) {
             const sala = salas.get(salaActual);
             if (sala) {
+                const jugadorDesconectado = sala.users.get(socket.id);
+                const nombreJugador = jugadorDesconectado ? jugadorDesconectado.nombre : 'Jugador';
+                
                 sala.users.delete(socket.id);
                 
-                // Notificar a los demás
+                // Notificar a todos que alguien abandonó
+                io.to(salaActual).emit("jugador_abandono", {
+                    socketId: socket.id,
+                    nombre: nombreJugador,
+                    mensaje: `${nombreJugador} ha abandonado el juego`
+                });
+                
+                // Notificar actualización de sala
                 const usersArray = Array.from(sala.users);
                 socket.to(salaActual).emit("actualizar_sala", {
                     salaId: salaActual,
@@ -253,13 +297,27 @@ io.on('connection', (socket) => {
                     contador: sala.users.size
                 });
                 
-                // Si la sala quedó vacía, reiniciar
+                // Si el juego estaba iniciado y quedan menos de 4, terminar juego
+                if (sala.juegoIniciado && sala.users.size < 4) {
+                    sala.juegoIniciado = false;
+                    sala.cartasRonda = [];
+                    sala.cartitasRonda = [];
+                    sala.ultimaCarta = null;
+                    sala.todos_limpian = 0;
+                    sala.turnoActual = 0;
+                    sala.ordenJugadores = [];
+                    io.to(salaActual).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
+                }
+                
+                // Si la sala quedó vacía, reiniciar completamente
                 if (sala.users.size === 0) {
                     sala.juegoIniciado = false;
                     sala.cartasRonda = [];
                     sala.cartitasRonda = [];
                     sala.ultimaCarta = null;
                     sala.todos_limpian = 0;
+                    sala.turnoActual = 0;
+                    sala.ordenJugadores = [];
                 }
             }
         }
