@@ -85,7 +85,11 @@ for (let i = 1; i <= MAX_SALAS; i++) {
         todos_limpian: 0,
         juegoIniciado: false,
         turnoActual: 0, // Índice del jugador al que le toca
-        ordenJugadores: [] // Array con los socket IDs en orden de turno
+        ordenJugadores: [], // Array con los socket IDs en orden de turno
+        // Sistema de equipos y puntuación
+        puntosEquipoA: 0, // Jugadores 0 y 2
+        puntosEquipoB: 0, // Jugadores 1 y 3
+        equipoGanador: null
     });
 }
 
@@ -174,6 +178,11 @@ io.on('connection', (socket) => {
         console.log(`Iniciando juego en ${sala.id}`);
         sala.juegoIniciado = true;
         
+        // Resetear puntuación
+        sala.puntosEquipoA = 0;
+        sala.puntosEquipoB = 0;
+        sala.equipoGanador = null;
+        
         let arrayCartitas = repartirCartas();
         let i = 0;
         
@@ -181,9 +190,14 @@ io.on('connection', (socket) => {
         sala.ordenJugadores = Array.from(sala.users.keys());
         sala.turnoActual = 0;
         
+        // Asignar equipos (0,2 = Equipo A; 1,3 = Equipo B)
+        let index = 0;
         sala.users.forEach((valor, clave) => {
             valor.cartas = arrayCartitas[i];
+            valor.equipo = index % 2 === 0 ? 'A' : 'B'; // 0,2 = A; 1,3 = B
+            valor.numeroJugador = index;
             i++;
+            index++;
         });
         
         sala.ultimaCarta = arrayCartitas[3][4];
@@ -193,7 +207,35 @@ io.on('connection', (socket) => {
         const primerTurno = sala.ordenJugadores[0];
         const primerJugador = sala.users.get(primerTurno);
         
-        io.to(sala.id).emit("start_game", usersArray, sala.ultimaCarta, primerTurno, primerJugador ? primerJugador.nombre : '');
+        // Enviar info de equipos
+        const equiposInfo = {};
+        sala.users.forEach((valor, clave) => {
+            equiposInfo[clave] = { equipo: valor.equipo, numero: valor.numeroJugador };
+        });
+        
+        io.to(sala.id).emit("start_game", usersArray, sala.ultimaCarta, primerTurno, primerJugador ? primerJugador.nombre : '', equiposInfo);
+        
+        // Enviar info de compañeros (quién es compañero de quién)
+        const companerosInfo = {};
+        const jugadoresArray = Array.from(sala.users.entries());
+        jugadoresArray.forEach(([id, datos], idx) => {
+            const companeroIdx = idx % 2 === 0 ? idx + 2 : idx - 2;
+            if (jugadoresArray[companeroIdx]) {
+                companerosInfo[id] = {
+                    companeroId: jugadoresArray[companeroIdx][0],
+                    companeroNombre: jugadoresArray[companeroIdx][1].nombre
+                };
+            }
+        });
+        io.to(sala.id).emit("companeros", companerosInfo);
+        
+        // Enviar puntuación inicial
+        io.to(sala.id).emit("actualizar_puntos", {
+            equipoA: 0,
+            equipoB: 0,
+            nombresEquipoA: jugadoresArray.filter((_,i) => i % 2 === 0).map(([_,d]) => d.nombre),
+            nombresEquipoB: jugadoresArray.filter((_,i) => i % 2 === 1).map(([_,d]) => d.nombre)
+        });
         
         const usersJSON = JSON.stringify(Array.from(sala.users.entries()));
         io.to(sala.id).emit('usuariosJSON', usersJSON);
@@ -242,9 +284,51 @@ io.on('connection', (socket) => {
         // Si todos jugaron, calcular ganador
         if (sala.cartasRonda.length === 4) {
             const ganador_ronda = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
+            
+            // Asignar punto al equipo del ganador
+            const jugadorGanador = sala.users.get(ganador_ronda.jugador);
+            if (jugadorGanador) {
+                if (jugadorGanador.equipo === 'A') {
+                    sala.puntosEquipoA++;
+                } else {
+                    sala.puntosEquipoB++;
+                }
+            }
+            
+            // Enviar info actualizada de puntos
+            const jugadoresArray = Array.from(sala.users.entries());
+            io.to(salaActual).emit("actualizar_puntos", {
+                equipoA: sala.puntosEquipoA,
+                equipoB: sala.puntosEquipoB,
+                nombresEquipoA: jugadoresArray.filter((_,i) => i % 2 === 0).map(([_,d]) => d.nombre),
+                nombresEquipoB: jugadoresArray.filter((_,i) => i % 2 === 1).map(([_,d]) => d.nombre),
+                ultimoGanador: ganador_ronda.jugador_name,
+                equipoGanadorRonda: jugadorGanador ? jugadorGanador.equipo : null
+            });
+            
             io.to(salaActual).emit("fin_ronda", ganador_ronda);
             sala.cartasRonda = [];
             sala.cartitasRonda = [];
+            
+            // Verificar si hay ganador de la partida (a 7 puntos)
+            if (sala.puntosEquipoA >= 7) {
+                sala.equipoGanador = 'A';
+                io.to(salaActual).emit("partida_ganada", {
+                    equipo: 'A',
+                    puntosA: sala.puntosEquipoA,
+                    puntosB: sala.puntosEquipoB,
+                    mensaje: `¡Equipo A gana la partida! ${sala.puntosEquipoA} - ${sala.puntosEquipoB}`
+                });
+            } else if (sala.puntosEquipoB >= 7) {
+                sala.equipoGanador = 'B';
+                io.to(salaActual).emit("partida_ganada", {
+                    equipo: 'B',
+                    puntosA: sala.puntosEquipoA,
+                    puntosB: sala.puntosEquipoB,
+                    mensaje: `¡Equipo B gana la partida! ${sala.puntosEquipoB} - ${sala.puntosEquipoA}`
+                });
+            }
+            
             // El ganador empieza la siguiente ronda
             const ganadorIndex = sala.ordenJugadores.indexOf(ganador_ronda.jugador);
             if (ganadorIndex !== -1) {
