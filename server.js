@@ -3,7 +3,7 @@ import { Server as SocketServer } from "socket.io";
 import http from 'http'
 import cors from 'cors'
 
-const PORT = 4000 || process.env.PORT
+const PORT = process.env.PORT || 4000
 //antes localhost ahora 192.168.1.137
 
 const app = express();
