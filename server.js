@@ -246,6 +246,7 @@ io.on('connection', (socket) => {
         sala.users.forEach((valor, clave) => {
             io.to(clave).emit('mis_cartas_apuestas', {
                 cartas: valor.cartas,
+                ultimaCarta: sala.ultimaCarta,  // Fallo/triunfo para decidir apuesta
                 mensaje: 'Tus cartas para decidir tu apuesta'
             });
         });
