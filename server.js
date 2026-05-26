@@ -292,20 +292,61 @@ io.on('connection', (socket) => {
             };
         }
         
-        // No tiene palo de salida. Verificar si debe fallar (triunfo) OBLIGATORIAMENTE
+        // No tiene palo de salida. Verificar situación de triunfo (fallo)
+        const tieneTriunfo = cartasJugador.some(c => getPalo(c) === paloTriunfo);
+        const cartasTriunfoEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloTriunfo);
+        const hayTriunfoEnMesa = cartasTriunfoEnMesa.length > 0;
+        
         if (paloTriunfo && paloCarta === paloTriunfo) {
-            // Está fallando con triunfo, es válido
-            return { valida: true, esFallo: true };
+            // Está jugando triunfo - verificar si debe superar
+            if (hayTriunfoEnMesa) {
+                const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
+                const valorMiTriunfo = valorCarta(carta);
+                const misTriunfos = cartasJugador.filter(c => getPalo(c) === paloTriunfo).map(c => valorCarta(c));
+                const puedoSuperar = misTriunfos.some(v => v > mayorTriunfoEnMesa);
+                
+                if (valorMiTriunfo > mayorTriunfoEnMesa) {
+                    // Sí supera, jugada válida
+                    return { valida: true, esFallo: true };
+                } else if (puedoSuperar) {
+                    // Tiene triunfos que superan pero no está jugando uno de ellos
+                    return {
+                        valida: false,
+                        mensaje: `Debes fallar superando: tienes triunfos que superan el ${mayorTriunfoEnMesa} en mesa.`
+                    };
+                } else {
+                    // No puede superar, cualquier triunfo es válido
+                    return { valida: true, esFallo: true };
+                }
+            } else {
+                // No hay triunfo en mesa, cualquier triunfo es válido
+                return { valida: true, esFallo: true };
+            }
         }
         
-        // No es triunfo. Verificar si tiene triunfos (obligado a fallar)
-        const tieneTriunfo = cartasJugador.some(c => getPalo(c) === paloTriunfo);
+        // No está jugando triunfo. Verificar si debe fallar obligatoriamente
         if (tieneTriunfo) {
-            // Tiene triunfos, está obligado a fallar
-            return {
-                valida: false,
-                mensaje: `Debes fallar: tienes triunfos (${paloTriunfo}). Debes jugar un triunfo obligatoriamente.`
-            };
+            if (hayTriunfoEnMesa) {
+                const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
+                const misTriunfos = cartasJugador.filter(c => getPalo(c) === paloTriunfo).map(c => valorCarta(c));
+                const puedoSuperar = misTriunfos.some(v => v > mayorTriunfoEnMesa);
+                
+                if (puedoSuperar) {
+                    // Tiene triunfos que superan, debe fallar obligatoriamente
+                    return {
+                        valida: false,
+                        mensaje: `Debes fallar superando: tienes triunfos (${paloTriunfo}) que superan el ${mayorTriunfoEnMesa} en mesa.`
+                    };
+                }
+                // No puede superar el triunfo en mesa, no está obligado a fallar
+                return { valida: true, esDescarte: true };
+            } else {
+                // No hay triunfo en mesa, debe fallar obligatoriamente
+                return {
+                    valida: false,
+                    mensaje: `Debes fallar: tienes triunfos (${paloTriunfo}) y no hay triunfo en mesa.`
+                };
+            }
         }
         
         // No tiene palo de salida ni triunfos, puede jugar cualquier otra carta
