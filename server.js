@@ -292,34 +292,23 @@ io.on('connection', (socket) => {
             };
         }
         
-        // No tiene palo de salida. Verificar si debe fallar (triunfo)
+        // No tiene palo de salida. Verificar si debe fallar (triunfo) OBLIGATORIAMENTE
         if (paloTriunfo && paloCarta === paloTriunfo) {
             // Está fallando con triunfo, es válido
             return { valida: true, esFallo: true };
         }
         
-        // No es triunfo. Verificar si tiene triunfos
+        // No es triunfo. Verificar si tiene triunfos (obligado a fallar)
         const tieneTriunfo = cartasJugador.some(c => getPalo(c) === paloTriunfo);
         if (tieneTriunfo) {
-            // Buscar la carta más alta de triunfo en la mesa
-            const cartasTriunfoEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloTriunfo);
-            if (cartasTriunfoEnMesa.length > 0) {
-                const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
-                const valorMiTriunfo = cartasJugador
-                    .filter(c => getPalo(c) === paloTriunfo)
-                    .map(c => valorCarta(c));
-                const puedoSuperar = valorMiTriunfo.some(v => v > mayorTriunfoEnMesa);
-                
-                if (puedoSuperar) {
-                    return {
-                        valida: false,
-                        mensaje: `Debes fallar superando: tienes triunfos (${paloTriunfo}) que superan el ${mayorTriunfoEnMesa} en mesa.`
-                    };
-                }
-            }
+            // Tiene triunfos, está obligado a fallar
+            return {
+                valida: false,
+                mensaje: `Debes fallar: tienes triunfos (${paloTriunfo}). Debes jugar un triunfo obligatoriamente.`
+            };
         }
         
-        // No tiene palo de salida ni puede/quiere fallar, puede jugar cualquier otra carta
+        // No tiene palo de salida ni triunfos, puede jugar cualquier otra carta
         return { valida: true, esDescarte: true };
     }
     
