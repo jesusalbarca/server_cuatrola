@@ -50,21 +50,45 @@ function valorCarta(carta) {
 
 // Función para calcular ganador de ronda
 function calcularGanadorRonda(ultimaCarta, cartasRonda, users) {
-  const cartasFallo = cartasRonda.filter((carta) => carta.carta.endsWith(ultimaCarta.split('De')[1]));
+  console.log('🔍 calcularGanadorRonda - ultimaCarta:', ultimaCarta);
+  console.log('🔍 calcularGanadorRonda - cartasRonda:', cartasRonda);
+  
+  if (!ultimaCarta || !cartasRonda || cartasRonda.length === 0) {
+    console.error('❌ Datos inválidos para calcular ganador');
+    return null;
+  }
+  
+  const paloTriunfo = ultimaCarta.split('De')[1];
+  console.log('🔍 Palo de triunfo:', paloTriunfo);
+  
+  const cartasFallo = cartasRonda.filter((carta) => carta.carta.endsWith(paloTriunfo));
+  console.log('🔍 Cartas de fallo:', cartasFallo);
+  
   if (cartasFallo.length > 0) {
     const cartaGanadora = cartasFallo.sort((a, b) => valorCarta(b.carta) - valorCarta(a.carta))[0];
     const jugador = users.get(cartaGanadora.jugador);
-    return { ...cartaGanadora, paloGanador: ultimaCarta.split('De')[1], jugador_name: jugador ? jugador.nombre : 'Desconocido' };
+    console.log('✅ Gana por fallo:', cartaGanadora);
+    return { ...cartaGanadora, paloGanador: paloTriunfo, jugador_name: jugador ? jugador.nombre : 'Desconocido' };
   }
-  const paloFallo = ultimaCarta.split('De')[1];
-  const cartasMismoPalo = cartasRonda.filter((carta) => carta.carta.endsWith(paloFallo));
+  
+  // Si no hay fallo, usar el palo de la primera carta (palo de salida)
+  const paloSalida = cartasRonda[0].carta.split('De')[1];
+  console.log('🔍 Palo de salida:', paloSalida);
+  
+  const cartasMismoPalo = cartasRonda.filter((carta) => carta.carta.endsWith(paloSalida));
+  console.log('🔍 Cartas del mismo palo:', cartasMismoPalo);
+  
   if (cartasMismoPalo.length > 0) {
     const cartaGanadora = cartasMismoPalo.sort((a, b) => valorCarta(b.carta) - valorCarta(a.carta))[0];
     const jugador = users.get(cartaGanadora.jugador);
-    return { ...cartaGanadora, paloGanador: paloFallo, jugador_name: jugador ? jugador.nombre : 'Desconocido' };
+    console.log('✅ Gana por palo:', cartaGanadora);
+    return { ...cartaGanadora, paloGanador: paloSalida, jugador_name: jugador ? jugador.nombre : 'Desconocido' };
   }
+  
+  // Fallback: carta más alta
   const cartaGanadora = cartasRonda.sort((a, b) => valorCarta(b.carta) - valorCarta(a.carta))[0];
   const jugador = users.get(cartaGanadora.jugador);
+  console.log('✅ Gana por valor:', cartaGanadora);
   return { ...cartaGanadora, paloGanador: null, jugador_name: jugador ? jugador.nombre : 'Desconocido' };
 }
 
@@ -649,7 +673,23 @@ io.on('connection', (socket) => {
         
         // Si todos jugaron, calcular ganador de la BAZA
         if (sala.cartasRonda.length === 4) {
-            const ganador_baza = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
+            console.log(`🎲 Calculando ganador de baza ${sala.bazasJugadasMano + 1}/5`);
+            console.log('Cartas en mesa:', sala.cartasRonda);
+            console.log('Última carta (fallo):', sala.ultimaCarta);
+            
+            let ganador_baza;
+            try {
+                ganador_baza = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
+                console.log('✅ Ganador calculado:', ganador_baza);
+            } catch (error) {
+                console.error('❌ Error al calcular ganador:', error);
+                // Fallback: primer jugador gana
+                ganador_baza = { 
+                    jugador: sala.cartasRonda[0].jugador, 
+                    carta: sala.cartasRonda[0].carta,
+                    jugador_name: sala.users.get(sala.cartasRonda[0].jugador)?.nombre || 'Desconocido'
+                };
+            }
             
             // Acumular cartas ganadas al equipo correspondiente
             const jugadorGanador = sala.users.get(ganador_baza.jugador);
@@ -698,6 +738,12 @@ io.on('connection', (socket) => {
             }
             
             // Notificar fin de baza con info de cantes disponibles
+            console.log('📢 Emitiendo fin_baza a sala:', salaActual);
+            console.log('📢 Datos fin_baza:', {
+                ganador: ganador_baza,
+                bazasJugadas: sala.bazasJugadasMano,
+                jugadoresQuePuedenCantar: jugadoresQuePuedenCantar.length
+            });
             io.to(salaActual).emit("fin_baza", {
                 ganador: ganador_baza,
                 bazasJugadas: sala.bazasJugadasMano,
