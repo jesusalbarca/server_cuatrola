@@ -242,6 +242,14 @@ io.on('connection', (socket) => {
             esMano: idx === 0
         }));
         
+        // Enviar cartas a cada jugador ANTES de la fase de apuestas
+        sala.users.forEach((valor, clave) => {
+            io.to(clave).emit('mis_cartas_apuestas', {
+                cartas: valor.cartas,
+                mensaje: 'Tus cartas para decidir tu apuesta'
+            });
+        });
+        
         io.to(sala.id).emit('fase_apuestas', {
             jugadores: jugadoresInfo,
             mano: { id: primerTurno, nombre: primerJugador ? primerJugador.nombre : '' },
