@@ -454,12 +454,18 @@ io.on('connection', (socket) => {
         }));
         const primerJugador = sala.users.get(sala.ordenJugadores[0]);
         
+        // Construir equiposInfo correctamente (sala.users es un Map)
+        const equiposInfo = {};
+        sala.users.forEach((data, id) => {
+            equiposInfo[id] = { equipo: data.equipo, numero: data.numeroJugador };
+        });
+        
         io.to(salaId).emit("start_game", 
             jugadoresInfo, 
             sala.ultimaCarta, 
             sala.ordenJugadores[0],
             primerJugador ? primerJugador.nombre : '',
-            Object.fromEntries(sala.users.map(d => [d.id, {equipo: d.equipo, numero: d.numeroJugador}]))
+            equiposInfo
         );
         sala.juegoActivo = true;
     }
@@ -472,12 +478,18 @@ io.on('connection', (socket) => {
         }));
         const primerJugador = sala.users.get(sala.ordenJugadores[0]);
         
+        // Construir equiposInfo correctamente (sala.users es un Map)
+        const equiposInfo = {};
+        sala.users.forEach((data, id) => {
+            equiposInfo[id] = { equipo: data.equipo, numero: data.numeroJugador };
+        });
+        
         io.to(salaId).emit("start_game", 
             jugadoresInfo, 
             sala.ultimaCarta, 
             sala.ordenJugadores[0],
             primerJugador ? primerJugador.nombre : '',
-            Object.fromEntries(sala.users.map(d => [d.id, {equipo: d.equipo, numero: d.numeroJugador}]))
+            equiposInfo
         );
         
         if (sala.cuatrolaActiva) {
@@ -513,8 +525,9 @@ io.on('connection', (socket) => {
         // Paso
         if (tipoApuesta === 'paso') {
             sala.jugadoresPasaron.add(jugador);
+            const apuestaId = Date.now() + '_' + jugador;
             io.to(salaActual).emit("apuesta_realizada", {
-                jugador: jugadorData.nombre, tipo: 'paso', mensaje: `${jugadorData.nombre} PASA`
+                id: apuestaId, jugador: jugadorData.nombre, tipo: 'paso', mensaje: `${jugadorData.nombre} PASA`
             });
             
             if (sala.jugadoresPasaron.size === 4) {
@@ -548,15 +561,17 @@ io.on('connection', (socket) => {
         sala.apuestas.push(apuesta);
         sala.apuestaActual = apuesta;
         
-        if (tipoApuesta === 'cuatrola' || tipoApuesta === 'quintola') {
+        // Solo, Cuatrola y Quintola: el compañero no juega
+        if (tipoApuesta === 'solo' || tipoApuesta === 'cuatrola' || tipoApuesta === 'quintola') {
             sala.cuatrolaActiva = apuesta;
             const idx = sala.ordenJugadores.indexOf(jugador);
             sala.compañeroNoJuega = sala.ordenJugadores[(idx + 2) % 4];
             sala.cuatrolaBazasGanadas = 0;
         }
         
+        const apuestaId = Date.now() + '_' + jugador;
         io.to(salaActual).emit("apuesta_realizada", {
-            jugador: jugadorData.nombre, tipo: tipoApuesta, valor: apuesta.valor,
+            id: apuestaId, jugador: jugadorData.nombre, tipo: tipoApuesta, valor: apuesta.valor,
             mensaje: `${jugadorData.nombre} apuesta ${tipoApuesta.toUpperCase()} (${apuesta.valor} pts)`
         });
         
