@@ -86,10 +86,15 @@ for (let i = 1; i <= MAX_SALAS; i++) {
         juegoIniciado: false,
         turnoActual: 0, // Índice del jugador al que le toca
         ordenJugadores: [], // Array con los socket IDs en orden de turno
-        // Sistema de equipos y puntuación
-        puntosEquipoA: 0, // Jugadores 0 y 2
-        puntosEquipoB: 0, // Jugadores 1 y 3
-        equipoGanador: null
+        // Sistema de equipos y puntuación por RONDAS (manos)
+        puntosRondaEquipoA: 0, // Puntos de RONDA ganados (a 7)
+        puntosRondaEquipoB: 0, 
+        equipoGanador: null,
+        // Sistema de manos (5 bazas)
+        cartasGanadasEquipoA: [], // Cartas acumuladas en la mano actual
+        cartasGanadasEquipoB: [],
+        bazasJugadasMano: 0, // Contador de bazas (0-5)
+        ganadorUltimaBaza: null // Quién ganó la última baza para empezar la siguiente
     });
 }
 
@@ -178,10 +183,16 @@ io.on('connection', (socket) => {
         console.log(`Iniciando juego en ${sala.id}`);
         sala.juegoIniciado = true;
         
-        // Resetear puntuación
-        sala.puntosEquipoA = 0;
-        sala.puntosEquipoB = 0;
+        // Resetear puntuación de RONDAS (a 7)
+        sala.puntosRondaEquipoA = 0;
+        sala.puntosRondaEquipoB = 0;
         sala.equipoGanador = null;
+        
+        // Resetear mano actual
+        sala.cartasGanadasEquipoA = [];
+        sala.cartasGanadasEquipoB = [];
+        sala.bazasJugadasMano = 0;
+        sala.ganadorUltimaBaza = null;
         
         let arrayCartitas = repartirCartas();
         let i = 0;
@@ -216,29 +227,100 @@ io.on('connection', (socket) => {
         io.to(sala.id).emit("start_game", usersArray, sala.ultimaCarta, primerTurno, primerJugador ? primerJugador.nombre : '', equiposInfo);
         
         // Enviar info de compañeros (quién es compañero de quién)
+        // Fórmula: (idx + 2) % 4 → 0↔2, 1↔3
         const companerosInfo = {};
         const jugadoresArray = Array.from(sala.users.entries());
         jugadoresArray.forEach(([id, datos], idx) => {
-            const companeroIdx = idx % 2 === 0 ? idx + 2 : idx - 2;
+            const companeroIdx = (idx + 2) % 4;
             if (jugadoresArray[companeroIdx]) {
                 companerosInfo[id] = {
                     companeroId: jugadoresArray[companeroIdx][0],
-                    companeroNombre: jugadoresArray[companeroIdx][1].nombre
+                    companeroNombre: jugadoresArray[companeroIdx][1].nombre,
+                    miEquipo: datos.equipo,
+                    miNumero: idx
                 };
             }
         });
         io.to(sala.id).emit("companeros", companerosInfo);
         
-        // Enviar puntuación inicial
+        // Enviar puntuación inicial de RONDAS (a 7)
         io.to(sala.id).emit("actualizar_puntos", {
-            equipoA: 0,
-            equipoB: 0,
+            puntosRondaA: 0,
+            puntosRondaB: 0,
+            bazasMano: 0,
             nombresEquipoA: jugadoresArray.filter((_,i) => i % 2 === 0).map(([_,d]) => d.nombre),
             nombresEquipoB: jugadoresArray.filter((_,i) => i % 2 === 1).map(([_,d]) => d.nombre)
         });
         
         const usersJSON = JSON.stringify(Array.from(sala.users.entries()));
         io.to(sala.id).emit('usuariosJSON', usersJSON);
+    }
+    
+    // Función para obtener palo de una carta
+    function getPalo(carta) {
+        return carta.split('De')[1];
+    }
+    
+    // Función para validar si una jugada es legal
+    function validarJugada(sala, jugador, carta) {
+        const jugadorData = sala.users.get(jugador);
+        if (!jugadorData) return { valida: false, mensaje: "Jugador no encontrado" };
+        
+        const cartasJugador = jugadorData.cartas;
+        const paloCarta = getPalo(carta);
+        const paloTriunfo = sala.ultimaCarta ? getPalo(sala.ultimaCarta) : null;
+        
+        // Si es el primero en jugar (no hay cartas en mesa), cualquier carta es válida
+        if (sala.cartasRonda.length === 0) {
+            return { valida: true };
+        }
+        
+        // Obtener palo de salida (palo de la primera carta jugada)
+        const paloSalida = getPalo(sala.cartasRonda[0].carta);
+        
+        // Si la carta es del palo de salida, siempre es válida (asistir)
+        if (paloCarta === paloSalida) {
+            return { valida: true };
+        }
+        
+        // Si no es del palo de salida, verificar si tiene cartas del palo de salida
+        const tienePaloSalida = cartasJugador.some(c => getPalo(c) === paloSalida);
+        if (tienePaloSalida) {
+            return { 
+                valida: false, 
+                mensaje: `Debes asistir: tienes cartas del palo de ${paloSalida}. Obligado a jugar ese palo.` 
+            };
+        }
+        
+        // No tiene palo de salida. Verificar si debe fallar (triunfo)
+        if (paloTriunfo && paloCarta === paloTriunfo) {
+            // Está fallando con triunfo, es válido
+            return { valida: true, esFallo: true };
+        }
+        
+        // No es triunfo. Verificar si tiene triunfos
+        const tieneTriunfo = cartasJugador.some(c => getPalo(c) === paloTriunfo);
+        if (tieneTriunfo) {
+            // Buscar la carta más alta de triunfo en la mesa
+            const cartasTriunfoEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloTriunfo);
+            if (cartasTriunfoEnMesa.length > 0) {
+                const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
+                const valorMiTriunfo = cartasJugador
+                    .filter(c => getPalo(c) === paloTriunfo)
+                    .map(c => valorCarta(c));
+                const puedoSuperar = valorMiTriunfo.some(v => v > mayorTriunfoEnMesa);
+                
+                if (puedoSuperar) {
+                    return {
+                        valida: false,
+                        mensaje: `Debes fallar superando: tienes triunfos (${paloTriunfo}) que superan el ${mayorTriunfoEnMesa} en mesa.`
+                    };
+                }
+            }
+        }
+        
+        // No tiene palo de salida ni puede/quiere fallar, puede jugar cualquier otra carta
+        return { valida: true, esDescarte: true };
     }
     
     // Evento para jugar carta
@@ -262,6 +344,13 @@ io.on('connection', (socket) => {
             return;
         }
         
+        // Validar la jugada según reglas
+        const validacion = validarJugada(sala, jugador, carta);
+        if (!validacion.valida) {
+            socket.emit("error_jugada", validacion.mensaje);
+            return;
+        }
+        
         let jugada = { jugador: jugador, carta: carta };
         sala.cartasRonda.push(jugada);
         
@@ -281,67 +370,173 @@ io.on('connection', (socket) => {
         const siguienteTurnoId = sala.ordenJugadores[sala.turnoActual];
         const siguienteJugador = sala.users.get(siguienteTurnoId);
         
-        // Si todos jugaron, calcular ganador
+        // Si todos jugaron, calcular ganador de la BAZA
         if (sala.cartasRonda.length === 4) {
-            const ganador_ronda = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
+            const ganador_baza = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
             
-            // Asignar punto al equipo del ganador
-            const jugadorGanador = sala.users.get(ganador_ronda.jugador);
+            // Acumular cartas ganadas al equipo correspondiente
+            const jugadorGanador = sala.users.get(ganador_baza.jugador);
+            const cartasDeLaBaza = sala.cartasRonda.map(j => j.carta);
+            
             if (jugadorGanador) {
                 if (jugadorGanador.equipo === 'A') {
-                    sala.puntosEquipoA++;
+                    sala.cartasGanadasEquipoA.push(...cartasDeLaBaza);
                 } else {
-                    sala.puntosEquipoB++;
+                    sala.cartasGanadasEquipoB.push(...cartasDeLaBaza);
                 }
             }
             
-            // Enviar info actualizada de puntos
-            const jugadoresArray = Array.from(sala.users.entries());
-            io.to(salaActual).emit("actualizar_puntos", {
-                equipoA: sala.puntosEquipoA,
-                equipoB: sala.puntosEquipoB,
-                nombresEquipoA: jugadoresArray.filter((_,i) => i % 2 === 0).map(([_,d]) => d.nombre),
-                nombresEquipoB: jugadoresArray.filter((_,i) => i % 2 === 1).map(([_,d]) => d.nombre),
-                ultimoGanador: ganador_ronda.jugador_name,
-                equipoGanadorRonda: jugadorGanador ? jugadorGanador.equipo : null
+            sala.bazasJugadasMano++;
+            sala.ganadorUltimaBaza = ganador_baza.jugador;
+            
+            // Notificar fin de baza
+            io.to(salaActual).emit("fin_baza", {
+                ganador: ganador_baza,
+                bazasJugadas: sala.bazasJugadasMano,
+                totalBazas: 5
             });
             
-            io.to(salaActual).emit("fin_ronda", ganador_ronda);
+            // Limpiar mesa para siguiente baza
             sala.cartasRonda = [];
             sala.cartitasRonda = [];
             
-            // Verificar si hay ganador de la partida (a 7 puntos)
-            if (sala.puntosEquipoA >= 7) {
-                sala.equipoGanador = 'A';
-                io.to(salaActual).emit("partida_ganada", {
-                    equipo: 'A',
-                    puntosA: sala.puntosEquipoA,
-                    puntosB: sala.puntosEquipoB,
-                    mensaje: `¡Equipo A gana la partida! ${sala.puntosEquipoA} - ${sala.puntosEquipoB}`
+            // Verificar si terminó la MANO (5 bazas)
+            if (sala.bazasJugadasMano >= 5) {
+                // Calcular puntos de cartas según valores: 1=11, 3=10, 10=2, 11=3, 12=4
+                function puntosCarta(carta) {
+                    const num = parseInt(carta.match(/\d+/)[0]);
+                    switch(num) {
+                        case 1: return 11;
+                        case 3: return 10;
+                        case 10: return 2;
+                        case 11: return 3;
+                        case 12: return 4;
+                        default: return 0;
+                    }
+                }
+                
+                const puntosA = sala.cartasGanadasEquipoA.reduce((sum, carta) => sum + puntosCarta(carta), 0);
+                const puntosB = sala.cartasGanadasEquipoB.reduce((sum, carta) => sum + puntosCarta(carta), 0);
+                
+                // Determinar ganador de la RONDA (mano)
+                let ganadorRonda = null;
+                if (puntosA > puntosB) {
+                    sala.puntosRondaEquipoA++;
+                    ganadorRonda = 'A';
+                } else if (puntosB > puntosA) {
+                    sala.puntosRondaEquipoB++;
+                    ganadorRonda = 'B';
+                } else {
+                    // Empate - nadie gana punto (o podría ser 0.5 para cada uno)
+                    ganadorRonda = 'EMPATE';
+                }
+                
+                // Notificar fin de ronda/mano
+                const jugadoresArray = Array.from(sala.users.entries());
+                io.to(salaActual).emit("fin_mano", {
+                    puntosCartasA: puntosA,
+                    puntosCartasB: puntosB,
+                    cartasA: sala.cartasGanadasEquipoA,
+                    cartasB: sala.cartasGanadasEquipoB,
+                    ganadorRonda: ganadorRonda,
+                    puntosRondaA: sala.puntosRondaEquipoA,
+                    puntosRondaB: sala.puntosRondaEquipoB
                 });
-            } else if (sala.puntosEquipoB >= 7) {
-                sala.equipoGanador = 'B';
-                io.to(salaActual).emit("partida_ganada", {
-                    equipo: 'B',
-                    puntosA: sala.puntosEquipoA,
-                    puntosB: sala.puntosEquipoB,
-                    mensaje: `¡Equipo B gana la partida! ${sala.puntosEquipoB} - ${sala.puntosEquipoA}`
+                
+                io.to(salaActual).emit("actualizar_puntos", {
+                    puntosRondaA: sala.puntosRondaEquipoA,
+                    puntosRondaB: sala.puntosRondaEquipoB,
+                    bazasMano: 0,
+                    nombresEquipoA: jugadoresArray.filter((_,i) => i % 2 === 0).map(([_,d]) => d.nombre),
+                    nombresEquipoB: jugadoresArray.filter((_,i) => i % 2 === 1).map(([_,d]) => d.nombre)
                 });
-            }
-            
-            // El ganador empieza la siguiente ronda
-            const ganadorIndex = sala.ordenJugadores.indexOf(ganador_ronda.jugador);
-            if (ganadorIndex !== -1) {
-                sala.turnoActual = ganadorIndex;
-                const nuevoTurno = sala.ordenJugadores[sala.turnoActual];
-                const nuevoJugador = sala.users.get(nuevoTurno);
-                io.to(salaActual).emit("cambio_turno", nuevoTurno, nuevoJugador ? nuevoJugador.nombre : '');
+                
+                // Verificar si hay ganador de la PARTIDA (a 7 rondas)
+                if (sala.puntosRondaEquipoA >= 7) {
+                    sala.equipoGanador = 'A';
+                    io.to(salaActual).emit("partida_ganada", {
+                        equipo: 'A',
+                        puntosA: sala.puntosRondaEquipoA,
+                        puntosB: sala.puntosRondaEquipoB,
+                        mensaje: `¡Equipo A gana la partida! ${sala.puntosRondaEquipoA} - ${sala.puntosRondaEquipoB}`
+                    });
+                } else if (sala.puntosRondaEquipoB >= 7) {
+                    sala.equipoGanador = 'B';
+                    io.to(salaActual).emit("partida_ganada", {
+                        equipo: 'B',
+                        puntosA: sala.puntosRondaEquipoA,
+                        puntosB: sala.puntosRondaEquipoB,
+                        mensaje: `¡Equipo B gana la partida! ${sala.puntosRondaEquipoB} - ${sala.puntosRondaEquipoA}`
+                    });
+                } else {
+                    // Nueva mano - repartir cartas de nuevo
+                    setTimeout(() => nuevaMano(sala), 3000);
+                }
+                
+                // El ganador de la última baza empieza la siguiente mano
+                if (sala.ganadorUltimaBaza) {
+                    const ganadorIndex = sala.ordenJugadores.indexOf(sala.ganadorUltimaBaza);
+                    if (ganadorIndex !== -1) {
+                        sala.turnoActual = ganadorIndex;
+                    }
+                }
+            } else {
+                // El ganador de la baza empieza la siguiente
+                const ganadorIndex = sala.ordenJugadores.indexOf(ganador_baza.jugador);
+                if (ganadorIndex !== -1) {
+                    sala.turnoActual = ganadorIndex;
+                    const nuevoTurno = sala.ordenJugadores[sala.turnoActual];
+                    const nuevoJugador = sala.users.get(nuevoTurno);
+                    io.to(salaActual).emit("cambio_turno", nuevoTurno, nuevoJugador ? nuevoJugador.nombre : '');
+                }
             }
         } else {
             // Notificar a todos de quién es el siguiente turno
             io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
         }
     });
+    
+    // Función para iniciar una nueva mano (repartir cartas nuevas)
+    function nuevaMano(sala) {
+        console.log(`Nueva mano en ${sala.id}`);
+        
+        // Resetear cartas ganadas y contadores de bazas
+        sala.cartasGanadasEquipoA = [];
+        sala.cartasGanadasEquipoB = [];
+        sala.bazasJugadasMano = 0;
+        sala.cartasRonda = [];
+        sala.cartitasRonda = [];
+        
+        // Repartir nuevas cartas
+        let arrayCartitas = repartirCartas();
+        let i = 0;
+        
+        sala.users.forEach((valor, clave) => {
+            valor.cartas = arrayCartitas[i];
+            i++;
+        });
+        
+        sala.ultimaCarta = arrayCartitas[3][4];
+        const usersArray = Array.from(sala.users);
+        
+        // El ganador de la última baza de la mano anterior empieza
+        const primerTurno = sala.ordenJugadores[sala.turnoActual];
+        const primerJugador = sala.users.get(primerTurno);
+        
+        // Enviar evento de nueva mano
+        io.to(sala.id).emit("nueva_mano", {
+            users: usersArray,
+            ultimaCarta: sala.ultimaCarta,
+            primerTurno: primerTurno,
+            primerTurnoNombre: primerJugador ? primerJugador.nombre : '',
+            puntosRondaA: sala.puntosRondaEquipoA,
+            puntosRondaB: sala.puntosRondaEquipoB
+        });
+        
+        // Actualizar cartas de cada jugador
+        const usersJSON = JSON.stringify(Array.from(sala.users.entries()));
+        io.to(sala.id).emit('usuariosJSON', usersJSON);
+    }
     
     // Evento para limpiar mesa
     socket.on("limpiar_mesa", () => {
