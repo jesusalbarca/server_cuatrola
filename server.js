@@ -122,6 +122,10 @@ for (let i = 1; i <= MAX_SALAS; i++) {
     });
 }
 
+// Mapa de jugadores desconectados temporalmente (para reconexión)
+// Clave: nombre+sala, Valor: { datos, salaId, timeout }
+const jugadoresDesconectados = new Map();
+
 // Endpoint para obtener estado de salas
 app.get('/', (req, res) => {
     const estadoSalas = [];
@@ -1037,6 +1041,66 @@ io.on('connection', (socket) => {
         }
     });
     
+    // Reconexión de jugador (vuelve tras perder conexión por pantalla apagada / cambio de app)
+    socket.on("reconnect_player", ({ nombre, salaId }) => {
+        const key = `${nombre}::${salaId}`;
+        const guardado = jugadoresDesconectados.get(key);
+        if (!guardado) {
+            socket.emit("reconnect_failed", "No hay sesión guardada para reconectar");
+            return;
+        }
+        
+        // Cancelar el timeout de eliminación
+        clearTimeout(guardado.timeout);
+        jugadoresDesconectados.delete(key);
+        
+        const sala = salas.get(salaId);
+        if (!sala) {
+            socket.emit("reconnect_failed", "La sala ya no existe");
+            return;
+        }
+        
+        // Restaurar jugador con el nuevo socket ID
+        const datosJugador = guardado.datos;
+        sala.users.set(socket.id, datosJugador);
+        
+        // Actualizar ordenJugadores sustituyendo el socket viejo por el nuevo
+        const idxViejo = sala.ordenJugadores.indexOf(guardado.socketIdAnterior);
+        if (idxViejo !== -1) sala.ordenJugadores[idxViejo] = socket.id;
+        
+        // Actualizar turnoActual si era el turno del jugador reconectado
+        if (sala.turnoActual !== undefined && sala.ordenJugadores[sala.turnoActual] === socket.id) {
+            // turnoActual ya apunta al nuevo id, ok
+        }
+        
+        // Actualizar compañeroNoJuega si era ese jugador
+        if (sala.compañeroNoJuega === guardado.socketIdAnterior) {
+            sala.compañeroNoJuega = socket.id;
+        }
+        
+        salaActual = salaId;
+        socket.join(salaId);
+        
+        console.log(`♻️ ${datosJugador.nombre} reconectado en ${salaId} (nuevo id: ${socket.id})`);
+        
+        // Notificar al jugador reconectado su estado actual
+        socket.emit("reconnected", {
+            mensaje: `Bienvenido de vuelta, ${datosJugador.nombre}`,
+            cartas: datosJugador.cartas,
+            ultimaCarta: sala.ultimaCarta,
+            turnoActual: sala.ordenJugadores[sala.turnoActual],
+            faseApuestas: sala.faseApuestas,
+            juegoActivo: sala.juegoActivo,
+            cartasRonda: sala.cartasRonda || []
+        });
+        
+        // Notificar al resto que el jugador volvió
+        socket.to(salaId).emit("jugador_volvio", {
+            nombre: datosJugador.nombre,
+            mensaje: `${datosJugador.nombre} ha vuelto a la partida`
+        });
+    });
+
     // Desconexión
     socket.on("disconnect", () => {
         console.log("Desconectado: " + socket.id);
@@ -1045,6 +1109,49 @@ io.on('connection', (socket) => {
             if (sala) {
                 const jugadorDesconectado = sala.users.get(socket.id);
                 const nombreJugador = jugadorDesconectado ? jugadorDesconectado.nombre : 'Jugador';
+                
+                // Grace period solo si el juego está en marcha con 4 jugadores (no en sala de espera)
+                if (sala.juegoActivo && sala.users.size === 4 && jugadorDesconectado) {
+                    const key = `${nombreJugador}::${salaActual}`;
+                    const timeoutId = setTimeout(() => {
+                        // Grace period expirado: eliminar jugador definitivamente
+                        jugadoresDesconectados.delete(key);
+                        const salaAun = salas.get(salaActual);
+                        if (salaAun && salaAun.users.has(socket.id)) {
+                            salaAun.users.delete(socket.id);
+                            io.to(salaActual).emit("jugador_abandono", {
+                                socketId: socket.id,
+                                nombre: nombreJugador,
+                                mensaje: `${nombreJugador} ha abandonado el juego`
+                            });
+                            if (salaAun.juegoIniciado && salaAun.users.size < 4) {
+                                salaAun.juegoIniciado = false;
+                                salaAun.cartasRonda = [];
+                                salaAun.cartitasRonda = [];
+                                salaAun.ultimaCarta = null;
+                                salaAun.todos_limpian = 0;
+                                salaAun.turnoActual = 0;
+                                salaAun.ordenJugadores = [];
+                                io.to(salaActual).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
+                            }
+                        }
+                    }, 30000);
+                    
+                    jugadoresDesconectados.set(key, {
+                        datos: jugadorDesconectado,
+                        socketIdAnterior: socket.id,
+                        salaId: salaActual,
+                        timeout: timeoutId
+                    });
+                    
+                    // Notificar al resto que está desconectado temporalmente
+                    io.to(salaActual).emit("jugador_desconectado_temp", {
+                        nombre: nombreJugador,
+                        mensaje: `${nombreJugador} se desconectó. Esperando reconexión (30s)...`
+                    });
+                    console.log(`⏳ ${nombreJugador} desconectado temporalmente. Grace period 30s.`);
+                    return;
+                }
                 
                 sala.users.delete(socket.id);
                 
