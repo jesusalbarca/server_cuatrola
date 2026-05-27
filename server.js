@@ -196,6 +196,8 @@ io.on('connection', (socket) => {
             jugadores: usersArray,
             contador: sala.users.size
         });
+        // Notificar a TODOS (incluidos los de otras salas) para actualizar el contador de jugadores
+        io.emit("salas_actualizado", { salaId: salaId, contador: sala.users.size });
         
         // Confirmar al jugador que se unió
         socket.emit("sala_unida", { salaId: salaId, nombre: sala.nombre });
@@ -221,6 +223,7 @@ io.on('connection', (socket) => {
         sala.cartasGanadasEquipoB = [];
         sala.bazasJugadasMano = 0;
         sala.ganadorUltimaBaza = null;
+        sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
         
         let arrayCartitas = repartirCartas();
         let i = 0;
@@ -280,6 +283,9 @@ io.on('connection', (socket) => {
             });
         });
         
+        // Jugador que tiene el fallo (quien baraja = manoIndex)
+        const jugadorFalloInicio = sala.users.get(sala.ordenJugadores[sala.manoIndex]);
+        
         io.to(sala.id).emit('fase_apuestas', {
             jugadores: jugadoresInfo,
             mano: { id: primerTurno, nombre: primerJugador ? primerJugador.nombre : '' },
@@ -287,7 +293,9 @@ io.on('connection', (socket) => {
             ordenApuestas: sala.ordenJugadores,
             mensaje: 'Fase de apuestas: Elige Solo (2pts), Cuatrola (4pts), Quintola (5pts), o Paso',
             puntosRondaA: sala.puntosRondaEquipoA,
-            puntosRondaB: sala.puntosRondaEquipoB
+            puntosRondaB: sala.puntosRondaEquipoB,
+            jugadorFalloNombre: jugadorFalloInicio ? jugadorFalloInicio.nombre : '',
+            jugadorFalloId: sala.ordenJugadores[sala.manoIndex]
         });
         
         // Enviar info de compañeros (quién es compañero de quién)
@@ -760,17 +768,25 @@ io.on('connection', (socket) => {
             // Acumular cartas ganadas al equipo correspondiente
             const jugadorGanador = sala.users.get(ganador_baza.jugador);
             const cartasDeLaBaza = sala.cartasRonda.map(j => j.carta);
+            const esUltimaBaza = sala.bazasJugadasMano + 1 >= (sala.compañeroNoJuega ? 5 : 5);
             
             if (jugadorGanador) {
                 if (jugadorGanador.equipo === 'A') {
                     sala.cartasGanadasEquipoA.push(...cartasDeLaBaza);
+                    // 10 de Montes: última baza suma 10 puntos extra
+                    if (esUltimaBaza) sala.cartasGanadasEquipoA.push('DIEZ_MONTES_10');
                 } else {
                     sala.cartasGanadasEquipoB.push(...cartasDeLaBaza);
+                    if (esUltimaBaza) sala.cartasGanadasEquipoB.push('DIEZ_MONTES_10');
                 }
             }
             
             sala.bazasJugadasMano++;
             sala.ganadorUltimaBaza = ganador_baza.jugador;
+            
+            // Conteo de bazas por equipo para mesa limpia
+            if (!sala.bazasGanadasPorEquipo) sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
+            if (jugadorGanador) sala.bazasGanadasPorEquipo[jugadorGanador.equipo]++;
             
             // Calcular palo de triunfo para emitir en fin_baza
             const paloTriunfo = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
@@ -853,6 +869,10 @@ io.on('connection', (socket) => {
             if (sala.bazasJugadasMano >= 5) {
                 // Calcular puntos de cartas según valores: 1=11, 3=10, 10=2, 11=3, 12=4
                 function puntosCarta(carta) {
+                    if (carta === 'DIEZ_MONTES_10') return 10;
+                    if (carta.startsWith('CANTO_')) {
+                        const partes = carta.split('_'); return parseInt(partes[2]) || 0;
+                    }
                     const num = parseInt(carta.match(/\d+/)[0]);
                     switch(num) {
                         case 1: return 11;
@@ -867,17 +887,61 @@ io.on('connection', (socket) => {
                 const puntosA = sala.cartasGanadasEquipoA.reduce((sum, carta) => sum + puntosCarta(carta), 0);
                 const puntosB = sala.cartasGanadasEquipoB.reduce((sum, carta) => sum + puntosCarta(carta), 0);
                 
+                // Mesa limpia: un equipo gana las 5 bazas → +2 puntos extra de ronda
+                const bazasEquipoA = sala.cartasGanadasEquipoA.filter(c => !c.startsWith('CANTO_') && c !== 'DIEZ_MONTES_10').length > 0 ?
+                    (sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.A : 0) : 0;
+                const mesaLimpia = sala.bazasGanadasPorEquipo &&
+                    (sala.bazasGanadasPorEquipo.A === 5 || sala.bazasGanadasPorEquipo.B === 5);
+                const equipoMesaLimpia = mesaLimpia ?
+                    (sala.bazasGanadasPorEquipo.A === 5 ? 'A' : 'B') : null;
+                
                 // Determinar ganador de la RONDA (mano)
                 let ganadorRonda = null;
-                if (puntosA > puntosB) {
-                    sala.puntosRondaEquipoA++;
+                let puntosRondaGanados = 1;
+                const bazasA = sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.A : 0;
+                const bazasB = sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.B : 0;
+                
+                if (sala.cuatrolaActiva) {
+                    const tipoApuesta = sala.cuatrolaActiva.tipo; // 'solo', 'cuatrola', 'quintola'
+                    const equipoApuesta = sala.cuatrolaActiva.equipo;
+                    const equipoContrario = equipoApuesta === 'A' ? 'B' : 'A';
+                    const bazasEquipoApuesta = equipoApuesta === 'A' ? bazasA : bazasB;
+                    
+                    let ganoApuesta = false;
+                    if (tipoApuesta === 'solo') {
+                        // Solo: gana/pierde por puntos de cartas
+                        const puntosEquipoApuesta = equipoApuesta === 'A' ? puntosA : puntosB;
+                        const puntosContrario = equipoApuesta === 'A' ? puntosB : puntosA;
+                        ganoApuesta = puntosEquipoApuesta > puntosContrario;
+                        puntosRondaGanados = 2;
+                    } else if (tipoApuesta === 'cuatrola') {
+                        // Cuatrola: necesita ganar 4 o más bazas
+                        ganoApuesta = bazasEquipoApuesta >= 4;
+                        puntosRondaGanados = 4;
+                    } else if (tipoApuesta === 'quintola') {
+                        // Quintola: necesita ganar las 5 bazas
+                        ganoApuesta = bazasEquipoApuesta === 5;
+                        puntosRondaGanados = 5;
+                    }
+                    
+                    ganadorRonda = ganoApuesta ? equipoApuesta : equipoContrario;
+                } else if (puntosA > puntosB) {
                     ganadorRonda = 'A';
                 } else if (puntosB > puntosA) {
-                    sala.puntosRondaEquipoB++;
                     ganadorRonda = 'B';
                 } else {
-                    // Empate - nadie gana punto (o podría ser 0.5 para cada uno)
                     ganadorRonda = 'EMPATE';
+                }
+                
+                if (ganadorRonda !== 'EMPATE') {
+                    if (ganadorRonda === 'A') {
+                        sala.puntosRondaEquipoA += puntosRondaGanados;
+                        // Mesa limpia solo aplica en juego normal (sin apuesta especial)
+                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'A') sala.puntosRondaEquipoA += 2;
+                    } else {
+                        sala.puntosRondaEquipoB += puntosRondaGanados;
+                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'B') sala.puntosRondaEquipoB += 2;
+                    }
                 }
                 
                 // Notificar fin de ronda/mano
@@ -889,7 +953,9 @@ io.on('connection', (socket) => {
                     cartasB: sala.cartasGanadasEquipoB,
                     ganadorRonda: ganadorRonda,
                     puntosRondaA: sala.puntosRondaEquipoA,
-                    puntosRondaB: sala.puntosRondaEquipoB
+                    puntosRondaB: sala.puntosRondaEquipoB,
+                    mesaLimpia: mesaLimpia ? equipoMesaLimpia : null,
+                    puntosRondaGanados: puntosRondaGanados
                 });
                 
                 io.to(salaActual).emit("actualizar_puntos", {
@@ -968,6 +1034,7 @@ io.on('connection', (socket) => {
         sala.cartasGanadasEquipoA = [];
         sala.cartasGanadasEquipoB = [];
         sala.bazasJugadasMano = 0;
+        sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
         sala.cartasRonda = [];
         sala.cartitasRonda = [];
         
@@ -1018,6 +1085,9 @@ io.on('connection', (socket) => {
         
         console.log(`📤 Emitiendo fase_apuestas - mano: ${primerTurno}, turnoApuesta: ${primerTurno}, manoIndex: ${sala.manoIndex}`);
         
+        // Jugador que tiene el fallo (quien baraja = manoIndex)
+        const jugadorFalloNuevaMano = sala.users.get(sala.ordenJugadores[sala.manoIndex]);
+        
         io.to(sala.id).emit('fase_apuestas', {
             jugadores: jugadoresInfo,
             mano: { id: primerTurno, nombre: primerJugador ? primerJugador.nombre : '' },
@@ -1025,7 +1095,9 @@ io.on('connection', (socket) => {
             ordenApuestas: sala.ordenJugadores,
             mensaje: 'Fase de apuestas: Elige Solo (2pts), Cuatrola (4pts), Quintola (5pts), o Paso',
             puntosRondaA: sala.puntosRondaEquipoA,
-            puntosRondaB: sala.puntosRondaEquipoB
+            puntosRondaB: sala.puntosRondaEquipoB,
+            jugadorFalloNombre: jugadorFalloNuevaMano ? jugadorFalloNuevaMano.nombre : '',
+            jugadorFalloId: sala.ordenJugadores[sala.manoIndex]
         });
     }
     
