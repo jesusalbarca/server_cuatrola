@@ -188,48 +188,10 @@ function botRealizarApuesta(sala, botId) {
     const bot = sala.users.get(botId);
     if (!bot || !bot.esBot) return;
     
-    // Analizar cartas del bot para decidir apuesta
-    const cartas = bot.cartas;
-    const paloTriunfo = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
+    // Los bots siempre pasan - no pueden hacer apuestas de solo/cuatrola/quintola
+    const tipoApuesta = 'paso';
     
-    // Contar cartas fuertes (1, 3, 12, 11, 10)
-    let cartasFuertes = 0;
-    let triunfosFuertes = 0;
-    let tiene11y12 = false;
-    const palos = ['Oros', 'Copas', 'Espadas', 'Bastos'];
-    
-    for (const palo of palos) {
-        const tiene11 = cartas.some(c => c === `11De${palo}`);
-        const tiene12 = cartas.some(c => c === `12De${palo}`);
-        if (tiene11 && tiene12) tiene11y12 = true;
-    }
-    
-    for (const carta of cartas) {
-        const valor = valorCarta(carta);
-        const paloCarta = carta.split('De')[1];
-        if (valor >= 3) {
-            cartasFuertes++;
-            if (paloCarta === paloTriunfo) triunfosFuertes++;
-        }
-    }
-    
-    // Lógica de apuesta
-    let tipoApuesta = 'paso';
-    
-    // Quintola: solo si tiene muchas cartas muy fuertes y 11+12 del triunfo
-    if (cartasFuertes >= 4 && triunfosFuertes >= 2 && tiene11y12) {
-        tipoApuesta = 'quintola';
-    }
-    // Cuatrola: si tiene cartas fuertes y buenos triunfos
-    else if (cartasFuertes >= 3 && triunfosFuertes >= 1) {
-        tipoApuesta = 'cuatrola';
-    }
-    // Solo: si tiene cartas decentes
-    else if (cartasFuertes >= 2) {
-        tipoApuesta = 'solo';
-    }
-    
-    console.log(`🤖 ${bot.nombre} apuesta: ${tipoApuesta} (cartas fuertes: ${cartasFuertes}, triunfos: ${triunfosFuertes})`);
+    console.log(`🤖 ${bot.nombre} pasa (bots solo pueden pasar)`);
     
     // Simular delay para que parezca más natural
     setTimeout(() => {
