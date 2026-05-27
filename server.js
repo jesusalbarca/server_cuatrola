@@ -126,6 +126,301 @@ for (let i = 1; i <= MAX_SALAS; i++) {
 // Clave: nombre+sala, Valor: { datos, salaId, timeout }
 const jugadoresDesconectados = new Map();
 
+// ===== SISTEMA DE BOTS =====
+// Mapa para rastrear bots activos: clave = botId, valor = { salaId, datos }
+const botsActivos = new Map();
+let botCounter = 0;
+
+// Nombres de bots disponibles
+const nombresBots = ['🤖 Bot Rápido', '🤖 Bot Listo', '🤖 Bot Astuto', '🤖 Bot Maestro', '🤖 Bot Experto', '🤖 Bot Genio', '🤖 Bot Crack', '🤖 Bot Pro'];
+
+// Función para crear un bot y añadirlo a una sala
+function crearBot(sala) {
+    botCounter++;
+    const botId = `bot_${Date.now()}_${botCounter}`;
+    const nombreBot = nombresBots[(botCounter - 1) % nombresBots.length];
+    
+    const datosBot = {
+        nombre: nombreBot,
+        cartas: [],
+        socketId: botId,
+        esBot: true,
+        equipo: null,
+        numeroJugador: null
+    };
+    
+    // Añadir bot a la sala
+    sala.users.set(botId, datosBot);
+    sala.ordenJugadores.push(botId);
+    
+    // Guardar referencia
+    botsActivos.set(botId, { salaId: sala.id, datos: datosBot });
+    
+    console.log(`🤖 Bot creado: ${nombreBot} (${botId}) en ${sala.id}. Jugadores: ${sala.users.size}/4`);
+    
+    return { botId, datosBot };
+}
+
+// Función para eliminar bots de una sala
+function eliminarBotsDeSala(sala) {
+    for (const [botId, info] of botsActivos.entries()) {
+        if (info.salaId === sala.id) {
+            sala.users.delete(botId);
+            const idx = sala.ordenJugadores.indexOf(botId);
+            if (idx !== -1) sala.ordenJugadores.splice(idx, 1);
+            botsActivos.delete(botId);
+            console.log(`🤖 Bot eliminado: ${botId} de ${sala.id}`);
+        }
+    }
+}
+
+// Función para contar jugadores reales (no bots)
+function contarJugadoresReales(sala) {
+    let count = 0;
+    for (const [id, datos] of sala.users.entries()) {
+        if (!datos.esBot) count++;
+    }
+    return count;
+}
+
+// Función para que un bot haga su apuesta
+function botRealizarApuesta(sala, botId) {
+    const bot = sala.users.get(botId);
+    if (!bot || !bot.esBot) return;
+    
+    // Analizar cartas del bot para decidir apuesta
+    const cartas = bot.cartas;
+    const paloTriunfo = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
+    
+    // Contar cartas fuertes (1, 3, 12, 11, 10)
+    let cartasFuertes = 0;
+    let triunfosFuertes = 0;
+    let tiene11y12 = false;
+    const palos = ['Oros', 'Copas', 'Espadas', 'Bastos'];
+    
+    for (const palo of palos) {
+        const tiene11 = cartas.some(c => c === `11De${palo}`);
+        const tiene12 = cartas.some(c => c === `12De${palo}`);
+        if (tiene11 && tiene12) tiene11y12 = true;
+    }
+    
+    for (const carta of cartas) {
+        const valor = valorCarta(carta);
+        const paloCarta = carta.split('De')[1];
+        if (valor >= 3) {
+            cartasFuertes++;
+            if (paloCarta === paloTriunfo) triunfosFuertes++;
+        }
+    }
+    
+    // Lógica de apuesta
+    let tipoApuesta = 'paso';
+    
+    // Quintola: solo si tiene muchas cartas muy fuertes y 11+12 del triunfo
+    if (cartasFuertes >= 4 && triunfosFuertes >= 2 && tiene11y12) {
+        tipoApuesta = 'quintola';
+    }
+    // Cuatrola: si tiene cartas fuertes y buenos triunfos
+    else if (cartasFuertes >= 3 && triunfosFuertes >= 1) {
+        tipoApuesta = 'cuatrola';
+    }
+    // Solo: si tiene cartas decentes
+    else if (cartasFuertes >= 2) {
+        tipoApuesta = 'solo';
+    }
+    
+    console.log(`🤖 ${bot.nombre} apuesta: ${tipoApuesta} (cartas fuertes: ${cartasFuertes}, triunfos: ${triunfosFuertes})`);
+    
+    // Simular delay para que parezca más natural
+    setTimeout(() => {
+        // Emitir evento de apuesta simulado
+        io.to(sala.id).emit("apuesta_realizada", {
+            id: Date.now() + '_' + botId,
+            jugador: bot.nombre,
+            tipo: tipoApuesta,
+            mensaje: tipoApuesta === 'paso' ? `${bot.nombre} PASA` : `${bot.nombre} apuesta ${tipoApuesta.toUpperCase()}`
+        });
+        
+        // Procesar la apuesta
+        if (tipoApuesta === 'paso') {
+            sala.jugadoresPasaron.add(botId);
+        } else {
+            const apuesta = {
+                jugador: botId,
+                jugadorName: bot.nombre,
+                tipo: tipoApuesta,
+                equipo: bot.equipo,
+                valor: tipoApuesta === 'solo' ? 2 : (tipoApuesta === 'cuatrola' ? 4 : 5)
+            };
+            sala.apuestas.push(apuesta);
+            sala.apuestaActual = apuesta;
+            
+            // Si es solo/cuatrola/quintola, termina la fase de apuestas
+            if (tipoApuesta === 'solo' || tipoApuesta === 'cuatrola' || tipoApuesta === 'quintola') {
+                sala.cuatrolaActiva = apuesta;
+                const idx = sala.ordenJugadores.indexOf(botId);
+                sala.compañeroNoJuega = sala.ordenJugadores[(idx + 2) % 4];
+                sala.cuatrolaBazasGanadas = 0;
+                
+                sala.faseApuestas = false;
+                iniciarJuegoConApuesta(sala, sala.id);
+                return;
+            }
+        }
+        
+        // Verificar si todos han apostado
+        const totalRespuestas = sala.apuestas.length + sala.jugadoresPasaron.size;
+        if (sala.jugadoresPasaron.size === 4) {
+            sala.faseApuestas = false;
+            iniciarJuegoNormal(sala, sala.id);
+            return;
+        }
+        
+        if (totalRespuestas >= 4) {
+            sala.faseApuestas = false;
+            iniciarJuegoConApuesta(sala, sala.id);
+            return;
+        }
+        
+        // Pasar al siguiente turno
+        const siguienteIdx = totalRespuestas % 4;
+        const siguienteId = sala.ordenJugadores[(sala.manoIndex + 1 + siguienteIdx) % 4];
+        const siguiente = sala.users.get(siguienteId);
+        
+        io.to(sala.id).emit("turno_apuesta", {
+            jugadorId: siguienteId,
+            jugadorNombre: siguiente ? siguiente.nombre : '',
+            apuestaActual: sala.apuestaActual,
+            mensaje: `Turno de ${siguiente ? siguiente.nombre : ''}`
+        });
+        
+        // Si el siguiente es un bot, que apueste también
+        if (siguiente && siguiente.esBot) {
+            setTimeout(() => botRealizarApuesta(sala, siguienteId), 1500);
+        }
+    }, 1000 + Math.random() * 1000); // Delay aleatorio entre 1-2 segundos
+}
+
+// Función para que un bot juegue una carta
+function botJugarCarta(sala, botId) {
+    const bot = sala.users.get(botId);
+    if (!bot || !bot.esBot) return;
+    
+    const cartasJugador = bot.cartas;
+    if (cartasJugador.length === 0) return;
+    
+    let cartaAJugar = null;
+    
+    // Si es el primero en jugar (no hay cartas en mesa)
+    if (sala.cartasRonda.length === 0) {
+        // Jugar la carta de menor valor
+        cartaAJugar = cartasJugador.reduce((min, carta) => {
+            return valorCarta(carta) < valorCarta(min) ? carta : min;
+        }, cartasJugador[0]);
+    } else {
+        // Hay cartas en mesa, seguir reglas
+        const paloSalida = sala.cartasRonda[0].carta.split('De')[1];
+        const paloTriunfo = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
+        
+        const cartasDelPalo = cartasJugador.filter(c => c.endsWith(paloSalida));
+        
+        if (cartasDelPalo.length > 0) {
+            // Tiene del palo de salida - jugar la más baja
+            cartaAJugar = cartasDelPalo.reduce((min, carta) => {
+                return valorCarta(carta) < valorCarta(min) ? carta : min;
+            }, cartasDelPalo[0]);
+        } else {
+            // No tiene del palo, buscar triunfo
+            const cartasTriunfo = cartasJugador.filter(c => c.endsWith(paloTriunfo));
+            if (cartasTriunfo.length > 0) {
+                // Jugar el triunfo más bajo
+                cartaAJugar = cartasTriunfo.reduce((min, carta) => {
+                    return valorCarta(carta) < valorCarta(min) ? carta : min;
+                }, cartasTriunfo[0]);
+            } else {
+                // No tiene triunfo, jugar carta más baja de cualquier palo
+                cartaAJugar = cartasJugador.reduce((min, carta) => {
+                    return valorCarta(carta) < valorCarta(min) ? carta : min;
+                }, cartasJugador[0]);
+            }
+        }
+    }
+    
+    console.log(`🤖 ${bot.nombre} juega: ${cartaAJugar}`);
+    
+    // Ejecutar la jugada
+    setTimeout(() => {
+        // Validar jugada
+        const validacion = validarJugada(sala, botId, cartaAJugar);
+        if (!validacion.valida) {
+            console.log(`🤖 ${bot.nombre} jugada inválida: ${validacion.mensaje}. Intentando otra carta...`);
+            // Si la jugada es inválida, intentar con otra carta
+            for (const otraCarta of cartasJugador) {
+                const val = validarJugada(sala, botId, otraCarta);
+                if (val.valida) {
+                    cartaAJugar = otraCarta;
+                    break;
+                }
+            }
+        }
+        
+        // Realizar la jugada
+        let jugada = { jugador: botId, carta: cartaAJugar };
+        sala.cartasRonda.push(jugada);
+        
+        // Quitar carta del bot
+        bot.cartas = bot.cartas.filter(c => c !== cartaAJugar);
+        
+        sala.cartitasRonda.push(cartaAJugar);
+        io.to(sala.id).emit("mostrar_cartas_mesa", sala.cartitasRonda);
+        
+        // Avanzar turno
+        sala.turnoActual = (sala.turnoActual + 1) % 4;
+        while (sala.compañeroNoJuega && sala.ordenJugadores[sala.turnoActual] === sala.compañeroNoJuega) {
+            sala.turnoActual = (sala.turnoActual + 1) % 4;
+        }
+        
+        const siguienteTurnoId = sala.ordenJugadores[sala.turnoActual];
+        const siguienteJugador = sala.users.get(siguienteTurnoId);
+        
+        // Emitir cambio de turno
+        io.to(sala.id).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
+        
+        // Si el siguiente es un bot, que juegue también
+        if (siguienteJugador && siguienteJugador.esBot) {
+            const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
+            if (sala.cartasRonda.length < cartasNecesarias) {
+                setTimeout(() => botJugarCarta(sala, siguienteTurnoId), 1500);
+            }
+        }
+        
+        // Verificar si todos jugaron
+        const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
+        if (sala.cartasRonda.length === cartasNecesarias) {
+            procesarFinBaza(sala);
+        }
+    }, 1500 + Math.random() * 1000);
+}
+
+// Función para procesar el fin de baza (extraer la lógica reutilizable)
+function procesarFinBaza(sala) {
+    console.log(`🎲 Calculando ganador de baza ${sala.bazasJugadasMano + 1}/5`);
+    
+    let ganador_baza;
+    try {
+        ganador_baza = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
+    } catch (error) {
+        console.error('❌ Error al calcular ganador:', error);
+        ganador_baza = { 
+            jugador: sala.cartasRonda[0].jugador, 
+            carta: sala.cartasRonda[0].carta,
+            jugador_name: sala.users.get(sala.cartasRonda[0].jugador)?.nombre || 'Desconocido'
+        };
+    }
+    
+    // ... (continúa con la lógica de fin de baza)
+}
+
 // Endpoint para obtener estado de salas
 app.get('/', (req, res) => {
     const estadoSalas = [];
@@ -206,6 +501,95 @@ io.on('connection', (socket) => {
         if (sala.users.size === 4) {
             setTimeout(() => iniciarJuego(sala), 500);
         }
+    });
+    
+    // Evento para activar bots y completar la sala
+    socket.on("activar_bots", (numeroSala) => {
+        const salaId = `sala${numeroSala}`;
+        const sala = salas.get(salaId);
+        
+        if (!sala) {
+            socket.emit("error_sala", "Sala no existe");
+            return;
+        }
+        
+        if (sala.juegoIniciado) {
+            socket.emit("error_sala", "El juego ya ha comenzado");
+            return;
+        }
+        
+        // Verificar que hay al menos 1 jugador real
+        const jugadoresReales = contarJugadoresReales(sala);
+        if (jugadoresReales === 0) {
+            socket.emit("error_sala", "Debe haber al menos un jugador real");
+            return;
+        }
+        
+        // Calcular cuántos bots necesitamos
+        const botsNecesarios = 4 - sala.users.size;
+        if (botsNecesarios <= 0) {
+            socket.emit("error_sala", "La sala ya está llena");
+            return;
+        }
+        
+        // Crear los bots necesarios
+        for (let i = 0; i < botsNecesarios; i++) {
+            crearBot(sala);
+        }
+        
+        // Notificar a todos en la sala
+        const usersArray = Array.from(sala.users);
+        io.to(salaId).emit("actualizar_sala", {
+            salaId: salaId,
+            jugadores: usersArray,
+            contador: sala.users.size,
+            botsActivados: true,
+            mensaje: `🤖 ${botsNecesarios} bot(s) añadido(s) a la sala`
+        });
+        
+        io.emit("salas_actualizado", { salaId: salaId, contador: sala.users.size });
+        
+        socket.emit("bots_activados", {
+            cantidad: botsNecesarios,
+            totalJugadores: sala.users.size,
+            mensaje: `${botsNecesarios} bot(s) añadido(s). ¡Listos para jugar!`
+        });
+        
+        console.log(`🤖 Bots activados en ${salaId}: ${botsNecesarios} bots. Total: ${sala.users.size}/4`);
+        
+        // Si ahora hay 4 jugadores, iniciar juego
+        if (sala.users.size === 4) {
+            setTimeout(() => iniciarJuego(sala), 500);
+        }
+    });
+    
+    // Evento para quitar bots de una sala
+    socket.on("quitar_bots", (numeroSala) => {
+        const salaId = `sala${numeroSala}`;
+        const sala = salas.get(salaId);
+        
+        if (!sala || sala.juegoIniciado) {
+            socket.emit("error_sala", "No se pueden quitar bots ahora");
+            return;
+        }
+        
+        const botsAntes = sala.users.size - contarJugadoresReales(sala);
+        eliminarBotsDeSala(sala);
+        const botsDespues = sala.users.size - contarJugadoresReales(sala);
+        const botsEliminados = botsAntes - botsDespues;
+        
+        if (botsEliminados > 0) {
+            const usersArray = Array.from(sala.users);
+            io.to(salaId).emit("actualizar_sala", {
+                salaId: salaId,
+                jugadores: usersArray,
+                contador: sala.users.size,
+                mensaje: `🤖 ${botsEliminados} bot(s) eliminado(s)`
+            });
+            io.emit("salas_actualizado", { salaId: salaId, contador: sala.users.size });
+        }
+        
+        socket.emit("bots_desactivados", { cantidad: botsEliminados });
     });
     
     // Función para iniciar juego en una sala
@@ -297,6 +681,12 @@ io.on('connection', (socket) => {
             jugadorFalloNombre: jugadorFalloInicio ? jugadorFalloInicio.nombre : '',
             jugadorFalloId: sala.ordenJugadores[sala.manoIndex]
         });
+        
+        // Si el primer jugador en apostar es un bot, hacer que apueste automáticamente
+        const primerJugadorData = sala.users.get(primerTurno);
+        if (primerJugadorData && primerJugadorData.esBot) {
+            setTimeout(() => botRealizarApuesta(sala, primerTurno), 2000);
+        }
         
         // Enviar info de compañeros (quién es compañero de quién)
         // Fórmula: (idx + 2) % 4 → 0↔2, 1↔3
@@ -534,6 +924,11 @@ io.on('connection', (socket) => {
         
         // Inicializar el turno actual para la nueva mano
         sala.turnoActual = primerTurnoIndex;
+        
+        // Si el primer jugador es un bot, hacer que juegue automáticamente
+        if (primerJugador && primerJugador.esBot) {
+            setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+        }
     }
     
     function iniciarJuegoConApuesta(sala, salaId) {
@@ -575,6 +970,11 @@ io.on('connection', (socket) => {
         }
         sala.juegoActivo = true;
         sala.turnoActual = primerTurnoIndex;
+        
+        // Si el primer jugador es un bot, hacer que juegue automáticamente
+        if (primerJugador && primerJugador.esBot) {
+            setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+        }
     }
     
     // Evento para realizar apuesta
@@ -635,6 +1035,11 @@ io.on('connection', (socket) => {
                 jugadorId: siguienteId, jugadorNombre: siguiente ? siguiente.nombre : '',
                 apuestaActual: sala.apuestaActual, mensaje: `Turno de ${siguiente ? siguiente.nombre : ''}`
             });
+            
+            // Si el siguiente es un bot, hacer que apueste automáticamente
+            if (siguiente && siguiente.esBot) {
+                setTimeout(() => botRealizarApuesta(sala, siguienteId), 1500);
+            }
             return;
         }
         
@@ -683,6 +1088,11 @@ io.on('connection', (socket) => {
             jugadorId: siguienteId, jugadorNombre: siguiente ? siguiente.nombre : '',
             apuestaActual: sala.apuestaActual, mensaje: `Turno de ${siguiente ? siguiente.nombre : ''}`
         });
+        
+        // Si el siguiente es un bot, hacer que apueste automáticamente
+        if (siguiente && siguiente.esBot) {
+            setTimeout(() => botRealizarApuesta(sala, siguienteId), 1500);
+        }
     });
     
     // Evento para jugar carta
@@ -743,6 +1153,17 @@ io.on('connection', (socket) => {
         }
         const siguienteTurnoId = sala.ordenJugadores[sala.turnoActual];
         const siguienteJugador = sala.users.get(siguienteTurnoId);
+        
+        // Notificar cambio de turno
+        io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
+        
+        // Si el siguiente jugador es un bot, hacer que juegue automáticamente
+        if (siguienteJugador && siguienteJugador.esBot) {
+            const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
+            if (sala.cartasRonda.length < cartasNecesarias) {
+                setTimeout(() => botJugarCarta(sala, siguienteTurnoId), 1500);
+            }
+        }
         
         const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
         // Si todos jugaron, calcular ganador de la BAZA
@@ -1099,6 +1520,11 @@ io.on('connection', (socket) => {
             jugadorFalloNombre: jugadorFalloNuevaMano ? jugadorFalloNuevaMano.nombre : '',
             jugadorFalloId: sala.ordenJugadores[sala.manoIndex]
         });
+        
+        // Si el primer jugador en apostar es un bot, hacer que apueste automáticamente
+        if (primerJugador && primerJugador.esBot) {
+            setTimeout(() => botRealizarApuesta(sala, primerTurno), 2000);
+        }
     }
     
     // Evento para limpiar mesa
