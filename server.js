@@ -2,6 +2,7 @@ import express from "express";
 import { Server as SocketServer } from "socket.io";
 import http from 'http'
 import cors from 'cors'
+import { register, login, getProfile, updateStats, getLeaderboard, authMiddleware } from './auth.js';
 
 const PORT = process.env.PORT || 4000
 
@@ -14,6 +15,7 @@ const io = new SocketServer(server, {
 })
 
 app.use(cors())
+app.use(express.json())
 
 // Cartas disponibles para el juego
 const cartasDisponibles = ['1DeOros', '3DeOros', '10DeOros', '11DeOros', '12DeOros',
@@ -46,6 +48,11 @@ function valorCarta(carta) {
     case 10: return 1;
     default: return valorNumerico;
   }
+}
+
+// Función para obtener palo de una carta (global para usar en bots y validación)
+function getPalo(carta) {
+    return carta.split('De')[1];
 }
 
 // Función para calcular ganador de ronda
@@ -125,6 +132,106 @@ for (let i = 1; i <= MAX_SALAS; i++) {
 // Mapa de jugadores desconectados temporalmente (para reconexión)
 // Clave: nombre+sala, Valor: { datos, salaId, timeout }
 const jugadoresDesconectados = new Map();
+
+// Función global para validar jugadas (disponible para bots y jugadores)
+function validarJugadaGlobal(sala, jugador, carta) {
+    const jugadorData = sala.users.get(jugador);
+    if (!jugadorData) return { valida: false, mensaje: "Jugador no encontrado" };
+    
+    const cartasJugador = jugadorData.cartas;
+    const paloCarta = getPalo(carta);
+    const paloTriunfo = sala.ultimaCarta ? getPalo(sala.ultimaCarta) : null;
+    
+    // Si es el primero en jugar (no hay cartas en mesa), cualquier carta es válida
+    if (sala.cartasRonda.length === 0) {
+        return { valida: true };
+    }
+    
+    // Obtener palo de salida (palo de la primera carta jugada)
+    const paloSalida = getPalo(sala.cartasRonda[0].carta);
+    
+    // Si la carta es del palo de salida, verificar si debe superar
+    if (paloCarta === paloSalida) {
+        const cartasPaloEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloSalida);
+        if (cartasPaloEnMesa.length > 0) {
+            const mayorCartaEnMesa = Math.max(...cartasPaloEnMesa.map(j => valorCarta(j.carta)));
+            const valorMiCarta = valorCarta(carta);
+            const misCartasDelPalo = cartasJugador.filter(c => getPalo(c) === paloSalida).map(c => valorCarta(c));
+            const puedoSuperar = misCartasDelPalo.some(v => v > mayorCartaEnMesa);
+            
+            if (valorMiCarta > mayorCartaEnMesa) {
+                return { valida: true };
+            } else if (puedoSuperar) {
+                return {
+                    valida: false,
+                    mensaje: `Debes asistir superando: tienes cartas del palo ${paloSalida} que superan la mesa.`
+                };
+            }
+        }
+        return { valida: true };
+    }
+    
+    // Si no es del palo de salida, verificar si tiene cartas del palo de salida
+    const tienePaloSalida = cartasJugador.some(c => getPalo(c) === paloSalida);
+    if (tienePaloSalida) {
+        return { 
+            valida: false, 
+            mensaje: `Debes asistir: tienes cartas del palo de ${paloSalida}. Obligado a jugar ese palo.` 
+        };
+    }
+    
+    // No tiene palo de salida. Verificar situación de triunfo (fallo)
+    const tieneTriunfo = cartasJugador.some(c => getPalo(c) === paloTriunfo);
+    const cartasTriunfoEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloTriunfo);
+    const hayTriunfoEnMesa = cartasTriunfoEnMesa.length > 0;
+    
+    if (paloTriunfo && paloCarta === paloTriunfo) {
+        if (hayTriunfoEnMesa) {
+            const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
+            const valorMiTriunfo = valorCarta(carta);
+            const misTriunfos = cartasJugador.filter(c => getPalo(c) === paloTriunfo).map(c => valorCarta(c));
+            const puedoSuperar = misTriunfos.some(v => v > mayorTriunfoEnMesa);
+            
+            if (valorMiTriunfo > mayorTriunfoEnMesa) {
+                return { valida: true, esFallo: true };
+            } else if (puedoSuperar) {
+                return {
+                    valida: false,
+                    mensaje: `Debes fallar superando: tienes triunfos que superan el ${mayorTriunfoEnMesa} en mesa.`
+                };
+            } else {
+                return { valida: true, esFallo: true };
+            }
+        } else {
+            return { valida: true, esFallo: true };
+        }
+    }
+    
+    // No está jugando triunfo. Verificar si debe fallar obligatoriamente
+    if (tieneTriunfo) {
+        if (hayTriunfoEnMesa) {
+            const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
+            const misTriunfos = cartasJugador.filter(c => getPalo(c) === paloTriunfo).map(c => valorCarta(c));
+            const puedoSuperar = misTriunfos.some(v => v > mayorTriunfoEnMesa);
+            
+            if (puedoSuperar) {
+                return {
+                    valida: false,
+                    mensaje: `Debes fallar superando: tienes triunfos (${paloTriunfo}) que superan el ${mayorTriunfoEnMesa} en mesa.`
+                };
+            }
+            return { valida: true, esDescarte: true };
+        } else {
+            return {
+                valida: false,
+                mensaje: `Debes fallar: tienes triunfos (${paloTriunfo}) y no hay triunfo en mesa.`
+            };
+        }
+    }
+    
+    // No tiene palo de salida ni triunfos, puede jugar cualquier otra carta
+    return { valida: true, esDescarte: true };
+}
 
 // ===== SISTEMA DE BOTS =====
 // Mapa para rastrear bots activos: clave = botId, valor = { salaId, datos }
@@ -263,13 +370,154 @@ function botRealizarApuesta(sala, botId) {
     }, 1000 + Math.random() * 1000); // Delay aleatorio entre 1-2 segundos
 }
 
+// Función para iniciar una nueva mano (repartir cartas nuevas) - MOVIDA a scope global
+function nuevaMano(sala) {
+    console.log(`🆕 Nueva mano en ${sala.id} - iniciando fase de apuestas`);
+    
+    // El mano pasa al jugador de la derecha (siguiente en orden)
+    // El que gana la última baza era el mano de esta mano, ahora pasa al siguiente
+    sala.manoIndex = (sala.manoIndex + 1) % 4;
+    sala.turnoActual = (sala.manoIndex + 1) % 4; // El que baraja tiene el fallo, el siguiente empieza
+    
+    console.log(`🎲 Nuevo mano: índice ${sala.manoIndex}, jugador ${sala.ordenJugadores[sala.manoIndex]}`);
+    
+    // Resetear cartas ganadas y contadores de bazas
+    sala.cartasGanadasEquipoA = [];
+    sala.cartasGanadasEquipoB = [];
+    sala.bazasJugadasMano = 0;
+    sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
+    sala.cartasRonda = [];
+    sala.cartitasRonda = [];
+    
+    // Resetear sistema de apuestas para la nueva mano
+    sala.faseApuestas = true;
+    sala.apuestas = [];
+    sala.apuestaActual = null;
+    sala.jugadoresPasaron.clear();
+    sala.cuatrolaActiva = null;
+    sala.compañeroNoJuega = null;
+    sala.cuatrolaBazasGanadas = 0;
+    sala.juegoActivo = false;
+    
+    // Resetear cantes para la nueva mano
+    sala.palosCantados = { A: [], B: [] };
+    
+    // Repartir nuevas cartas
+    let arrayCartitas = repartirCartas();
+    let i = 0;
+    
+    sala.users.forEach((valor, clave) => {
+        valor.cartas = arrayCartitas[i];
+        valor.noJuega = false; // Resetear flag de no jugar
+        i++;
+    });
+    
+    sala.ultimaCarta = arrayCartitas[sala.manoIndex][4];
+    const usersArray = Array.from(sala.users);
+    
+    // El que baraja tiene el fallo pero NO empieza; empieza el siguiente
+    const primerTurno = sala.ordenJugadores[(sala.manoIndex + 1) % 4];
+    const primerJugador = sala.users.get(primerTurno);
+    
+    // Enviar cartas a cada jugador ANTES de la fase de apuestas
+    sala.users.forEach((valor, clave) => {
+        io.to(clave).emit('mis_cartas_apuestas', {
+            cartas: valor.cartas,
+            ultimaCarta: sala.ultimaCarta,
+            mensaje: 'Tus cartas para decidir tu apuesta'
+        });
+    });
+    
+    // Iniciar fase de apuestas (igual que al inicio del juego)
+    const jugadoresInfo = sala.ordenJugadores.map(id => {
+        const j = sala.users.get(id);
+        return { id, nombre: j ? j.nombre : '', equipo: j ? j.equipo : '' };
+    });
+    
+    console.log(`📤 Emitiendo fase_apuestas - mano: ${primerTurno}, turnoApuesta: ${primerTurno}, manoIndex: ${sala.manoIndex}`);
+    
+    // Jugador que tiene el fallo (quien baraja = manoIndex)
+    const jugadorFalloNuevaMano = sala.users.get(sala.ordenJugadores[sala.manoIndex]);
+    
+    io.to(sala.id).emit('fase_apuestas', {
+        jugadores: jugadoresInfo,
+        mano: { id: primerTurno, nombre: primerJugador ? primerJugador.nombre : '' },
+        turnoApuesta: primerTurno,
+        ordenApuestas: sala.ordenJugadores,
+        mensaje: 'Fase de apuestas: Elige Solo (2pts), Cuatrola (4pts), Quintola (5pts), o Paso',
+        puntosRondaA: sala.puntosRondaEquipoA,
+        puntosRondaB: sala.puntosRondaEquipoB,
+        jugadorFalloNombre: jugadorFalloNuevaMano ? jugadorFalloNuevaMano.nombre : '',
+        jugadorFalloId: sala.ordenJugadores[sala.manoIndex]
+    });
+    
+    // Si el primer jugador en apostar es un bot, hacer que apueste automáticamente
+    if (primerJugador && primerJugador.esBot) {
+        setTimeout(() => botRealizarApuesta(sala, primerTurno), 2000);
+    }
+}
+
+// Función para iniciar juego normal (SCOPE GLOBAL - llamada desde procesarFinBaza)
+function iniciarJuegoNormal(sala, salaId) {
+    console.log(`🎮 iniciarJuegoNormal (global) - sala: ${salaId}, manoIndex: ${sala.manoIndex}`);
+    
+    const jugadoresArray = Array.from(sala.users.entries());
+    const jugadoresInfo = jugadoresArray.map(([id, data]) => ({
+        id, nombre: data.nombre, equipo: data.equipo, cartas: data.cartas
+    }));
+    
+    // El que baraja (manoIndex) tiene el fallo pero NO empieza; empieza el siguiente
+    const primerTurnoIndex = (sala.manoIndex + 1) % 4;
+    const primerJugador = sala.users.get(sala.ordenJugadores[primerTurnoIndex]);
+    
+    // Construir equiposInfo correctamente (sala.users es un Map)
+    const equiposInfo = {};
+    sala.users.forEach((data, id) => {
+        equiposInfo[id] = { equipo: data.equipo, numero: data.numeroJugador };
+    });
+    
+    const primerTurnoId = sala.ordenJugadores[primerTurnoIndex];
+    
+    console.log(`🎮 Emitiendo start_game - primer turno: ${primerTurnoId}, jugador: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
+    
+    io.to(salaId).emit("start_game", 
+        jugadoresInfo, 
+        sala.ultimaCarta, 
+        primerTurnoId,
+        primerJugador ? primerJugador.nombre : '',
+        equiposInfo
+    );
+    sala.juegoActivo = true;
+    
+    // Inicializar el turno actual para la nueva mano
+    sala.turnoActual = primerTurnoIndex;
+    
+    // Si el primer jugador es un bot, hacer que juegue automáticamente
+    if (primerJugador && primerJugador.esBot) {
+        console.log(`🤖 Primer jugador es bot: ${primerJugador.nombre}, cartas: ${primerJugador.cartas?.length || 0}`);
+        setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+    } else {
+        console.log(`👤 Primer jugador es humano: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
+    }
+}
+
 // Función para que un bot juegue una carta
 function botJugarCarta(sala, botId) {
+    console.log(`🤖 botJugarCarta llamado - botId: ${botId}, sala: ${sala.id}`);
+    
     const bot = sala.users.get(botId);
-    if (!bot || !bot.esBot) return;
+    if (!bot || !bot.esBot) {
+        console.log(`❌ botJugarCarta: bot no encontrado o no es bot`);
+        return;
+    }
     
     const cartasJugador = bot.cartas;
-    if (cartasJugador.length === 0) return;
+    console.log(`🤖 botJugarCarta: ${bot.nombre} tiene ${cartasJugador?.length || 0} cartas`);
+    
+    if (!cartasJugador || cartasJugador.length === 0) {
+        console.log(`❌ botJugarCarta: bot no tiene cartas`);
+        return;
+    }
     
     let cartaAJugar = null;
     
@@ -312,13 +560,13 @@ function botJugarCarta(sala, botId) {
     
     // Ejecutar la jugada
     setTimeout(() => {
-        // Validar jugada
-        const validacion = validarJugada(sala, botId, cartaAJugar);
+        // Validar jugada usando la función global
+        const validacion = validarJugadaGlobal(sala, botId, cartaAJugar);
         if (!validacion.valida) {
             console.log(`🤖 ${bot.nombre} jugada inválida: ${validacion.mensaje}. Intentando otra carta...`);
             // Si la jugada es inválida, intentar con otra carta
             for (const otraCarta of cartasJugador) {
-                const val = validarJugada(sala, botId, otraCarta);
+                const val = validarJugadaGlobal(sala, botId, otraCarta);
                 if (val.valida) {
                     cartaAJugar = otraCarta;
                     break;
@@ -332,6 +580,10 @@ function botJugarCarta(sala, botId) {
         
         // Quitar carta del bot
         bot.cartas = bot.cartas.filter(c => c !== cartaAJugar);
+        
+        // Emitir actualización de cartas a todos (igual que en carta_seleccionada)
+        const usersArray = Array.from(sala.users);
+        io.to(sala.id).emit("quitar_carta_usuario", usersArray);
         
         sala.cartitasRonda.push(cartaAJugar);
         io.to(sala.id).emit("mostrar_cartas_mesa", sala.cartitasRonda);
@@ -359,18 +611,19 @@ function botJugarCarta(sala, botId) {
         // Verificar si todos jugaron
         const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
         if (sala.cartasRonda.length === cartasNecesarias) {
-            procesarFinBaza(sala);
+            procesarFinBaza(sala, sala.id);
         }
     }, 1500 + Math.random() * 1000);
 }
 
 // Función para procesar el fin de baza (extraer la lógica reutilizable)
-function procesarFinBaza(sala) {
+function procesarFinBaza(sala, salaId) {
     console.log(`🎲 Calculando ganador de baza ${sala.bazasJugadasMano + 1}/5`);
     
     let ganador_baza;
     try {
         ganador_baza = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
+        console.log('✅ Ganador calculado:', ganador_baza);
     } catch (error) {
         console.error('❌ Error al calcular ganador:', error);
         ganador_baza = { 
@@ -380,7 +633,275 @@ function procesarFinBaza(sala) {
         };
     }
     
-    // ... (continúa con la lógica de fin de baza)
+    // Acumular cartas ganadas al equipo correspondiente
+    const jugadorGanador = sala.users.get(ganador_baza.jugador);
+    const cartasDeLaBaza = sala.cartasRonda.map(j => j.carta);
+    const esUltimaBaza = sala.bazasJugadasMano + 1 >= 5;
+    
+    if (jugadorGanador) {
+        if (jugadorGanador.equipo === 'A') {
+            sala.cartasGanadasEquipoA.push(...cartasDeLaBaza);
+            if (esUltimaBaza) sala.cartasGanadasEquipoA.push('DIEZ_MONTES_10');
+        } else {
+            sala.cartasGanadasEquipoB.push(...cartasDeLaBaza);
+            if (esUltimaBaza) sala.cartasGanadasEquipoB.push('DIEZ_MONTES_10');
+        }
+    }
+    
+    sala.bazasJugadasMano++;
+    sala.ganadorUltimaBaza = ganador_baza.jugador;
+    
+    // Conteo de bazas por equipo
+    if (!sala.bazasGanadasPorEquipo) sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
+    if (jugadorGanador) sala.bazasGanadasPorEquipo[jugadorGanador.equipo]++;
+    
+    // Calcular palo de triunfo
+    const paloTriunfo = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
+    
+    // Verificar si algún jugador del equipo ganador puede cantar
+    const jugadoresQuePuedenCantar = [];
+    const puedeCantarEnSiguienteBaza = sala.bazasJugadasMano >= 1 && sala.bazasJugadasMano <= 3;
+    
+    if (puedeCantarEnSiguienteBaza && jugadorGanador) {
+        const equipoGanador = jugadorGanador.equipo;
+        // Filtrar jugadores del equipo ganador, excluyendo al compañero que no juega (solo/cuatrola/quintola)
+        const jugadoresDelEquipo = Array.from(sala.users.entries()).filter(([id, data]) => {
+            // Debe ser del equipo ganador
+            if (data.equipo !== equipoGanador) return false;
+            // No debe ser el compañero que no juega
+            if (sala.compañeroNoJuega && id === sala.compañeroNoJuega) return false;
+            return true;
+        });
+        
+        if (!sala.palosCantados) {
+            sala.palosCantados = { A: [], B: [] };
+        }
+        
+        function verificarCantar(cartasJugador) {
+            const palos = ['Bastos', 'Copas', 'Espadas', 'Oros'];
+            for (const palo of palos) {
+                if (sala.palosCantados[equipoGanador].includes(palo)) continue;
+                const tiene11 = cartasJugador.some(c => c === `11De${palo}`);
+                const tiene12 = cartasJugador.some(c => c === `12De${palo}`);
+                if (tiene11 && tiene12) {
+                    const esPaloTriunfo = paloTriunfo && palo === paloTriunfo;
+                    return { puede: true, palo: palo, esTriunfo: esPaloTriunfo, puntos: esPaloTriunfo ? 40 : 20 };
+                }
+            }
+            return { puede: false };
+        }
+        
+        for (const [id, data] of jugadoresDelEquipo) {
+            const cantarInfo = verificarCantar(data.cartas);
+            if (cantarInfo.puede) {
+                jugadoresQuePuedenCantar.push({
+                    jugadorId: id,
+                    jugadorName: data.nombre,
+                    ...cantarInfo
+                });
+            }
+        }
+    }
+    
+    // Calcular puntos de cartas acumulados por cada equipo en esta mano
+    function calcularPuntosCartas(cartasGanadas) {
+        return cartasGanadas.reduce((sum, carta) => {
+            if (carta === 'DIEZ_MONTES_10') return sum + 10;
+            if (carta.startsWith('CANTO_')) {
+                const partes = carta.split('_');
+                return sum + (parseInt(partes[2]) || 0);
+            }
+            const match = carta.match(/\d+/);
+            if (!match) return sum;
+            const num = parseInt(match[0]);
+            switch(num) {
+                case 1: return sum + 11;
+                case 3: return sum + 10;
+                case 10: return sum + 2;
+                case 11: return sum + 3;
+                case 12: return sum + 4;
+                default: return sum;
+            }
+        }, 0);
+    }
+    
+    const puntosCartasA = calcularPuntosCartas(sala.cartasGanadasEquipoA);
+    const puntosCartasB = calcularPuntosCartas(sala.cartasGanadasEquipoB);
+    
+    // Notificar fin de baza
+    console.log('📢 Emitiendo fin_baza a sala:', salaId);
+    io.to(salaId).emit("fin_baza", {
+        ganador: ganador_baza,
+        bazasJugadas: sala.bazasJugadasMano,
+        totalBazas: 5,
+        jugadoresQuePuedenCantar: jugadoresQuePuedenCantar,
+        paloTriunfo: paloTriunfo,
+        bazasPorEquipo: sala.bazasGanadasPorEquipo || { A: 0, B: 0 },
+        puntosCartasPorEquipo: { A: puntosCartasA, B: puntosCartasB }
+    });
+    
+    // Limpiar mesa
+    sala.cartasRonda = [];
+    sala.cartitasRonda = [];
+    
+    // Si no terminó la mano, iniciar siguiente baza
+    if (sala.bazasJugadasMano < 5) {
+        const indexGanador = sala.ordenJugadores.indexOf(ganador_baza.jugador);
+        if (indexGanador !== -1) {
+            sala.turnoActual = indexGanador;
+            const primerTurnoId = sala.ordenJugadores[sala.turnoActual];
+            const primerJugador = sala.users.get(primerTurnoId);
+            
+            console.log(`🎮 Nueva baza iniciada. Primer turno: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
+            
+            setTimeout(() => {
+                io.to(salaId).emit("cambio_turno", primerTurnoId, primerJugador ? primerJugador.nombre : '');
+                io.to(salaId).emit("vaciar_mesa");
+                
+                if (primerJugador && primerJugador.esBot) {
+                    setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+                }
+            }, 3000);
+        }
+    } else {
+        // Fin de MANO (5 bazas completadas)
+        procesarFinMano(sala, salaId);
+    }
+    
+    return ganador_baza;
+}
+
+// Función para procesar el fin de mano (5 bazas)
+function procesarFinMano(sala, salaId) {
+    console.log(`🏁 Fin de mano en sala ${salaId}`);
+    
+    // Calcular puntos de cartas
+    function puntosCarta(carta) {
+        if (carta === 'DIEZ_MONTES_10') return 10;
+        if (carta.startsWith('CANTO_')) {
+            const partes = carta.split('_');
+            return parseInt(partes[2]) || 0;
+        }
+        const num = parseInt(carta.match(/\d+/)[0]);
+        switch(num) {
+            case 1: return 11;
+            case 3: return 10;
+            case 10: return 2;
+            case 11: return 3;
+            case 12: return 4;
+            default: return 0;
+        }
+    }
+    
+    const puntosA = sala.cartasGanadasEquipoA.reduce((sum, carta) => sum + puntosCarta(carta), 0);
+    const puntosB = sala.cartasGanadasEquipoB.reduce((sum, carta) => sum + puntosCarta(carta), 0);
+    
+    // Mesa limpia
+    const mesaLimpia = sala.bazasGanadasPorEquipo &&
+        (sala.bazasGanadasPorEquipo.A === 5 || sala.bazasGanadasPorEquipo.B === 5);
+    const equipoMesaLimpia = mesaLimpia ?
+        (sala.bazasGanadasPorEquipo.A === 5 ? 'A' : 'B') : null;
+    
+    // Determinar ganador
+    let ganadorRonda = null;
+    let puntosRondaGanados = 1;
+    const bazasA = sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.A : 0;
+    const bazasB = sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.B : 0;
+    
+    if (sala.cuatrolaActiva) {
+        const tipoApuesta = sala.cuatrolaActiva.tipo;
+        const equipoApuesta = sala.cuatrolaActiva.equipo;
+        const equipoContrario = equipoApuesta === 'A' ? 'B' : 'A';
+        const bazasEquipoApuesta = equipoApuesta === 'A' ? bazasA : bazasB;
+        
+        let ganoApuesta = false;
+        if (tipoApuesta === 'solo') {
+            const puntosEquipoApuesta = equipoApuesta === 'A' ? puntosA : puntosB;
+            const puntosContrario = equipoApuesta === 'A' ? puntosB : puntosA;
+            ganoApuesta = puntosEquipoApuesta > puntosContrario;
+            puntosRondaGanados = 2;
+        } else if (tipoApuesta === 'cuatrola') {
+            ganoApuesta = bazasEquipoApuesta >= 4;
+            puntosRondaGanados = 4;
+        } else if (tipoApuesta === 'quintola') {
+            ganoApuesta = bazasEquipoApuesta === 5;
+            puntosRondaGanados = 5;
+        }
+        
+        ganadorRonda = ganoApuesta ? equipoApuesta : equipoContrario;
+    } else if (puntosA > puntosB) {
+        ganadorRonda = 'A';
+    } else if (puntosB > puntosA) {
+        ganadorRonda = 'B';
+    } else {
+        ganadorRonda = 'EMPATE';
+    }
+    
+    // Asignar puntos
+    if (ganadorRonda !== 'EMPATE') {
+        if (ganadorRonda === 'A') {
+            // Mesa limpia da 2 puntos, no 3 (sobrescribe el punto normal)
+            if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'A') {
+                sala.puntosRondaEquipoA += 2;
+            } else {
+                sala.puntosRondaEquipoA += puntosRondaGanados;
+            }
+        } else {
+            // Mesa limpia da 2 puntos, no 3 (sobrescribe el punto normal)
+            if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'B') {
+                sala.puntosRondaEquipoB += 2;
+            } else {
+                sala.puntosRondaEquipoB += puntosRondaGanados;
+            }
+        }
+    }
+    
+    // Notificar fin de mano
+    const jugadoresArray = Array.from(sala.users.entries());
+    io.to(salaId).emit("fin_mano", {
+        puntosCartasA: puntosA,
+        puntosCartasB: puntosB,
+        cartasA: sala.cartasGanadasEquipoA,
+        cartasB: sala.cartasGanadasEquipoB,
+        ganadorRonda: ganadorRonda,
+        puntosRondaA: sala.puntosRondaEquipoA,
+        puntosRondaB: sala.puntosRondaEquipoB,
+        mesaLimpia: mesaLimpia ? equipoMesaLimpia : null,
+        puntosRondaGanados: puntosRondaGanados
+    });
+    
+    io.to(salaId).emit("actualizar_puntos", {
+        puntosRondaA: sala.puntosRondaEquipoA,
+        puntosRondaB: sala.puntosRondaEquipoB,
+        bazasMano: 0,
+        nombresEquipoA: jugadoresArray.filter((_, i) => i % 2 === 0).map(([_, d]) => d.nombre),
+        nombresEquipoB: jugadoresArray.filter((_, i) => i % 2 === 1).map(([_, d]) => d.nombre)
+    });
+    
+    // Verificar ganador de partida
+    if (sala.puntosRondaEquipoA >= 7) {
+        sala.equipoGanador = 'A';
+        io.to(salaId).emit("partida_ganada", {
+            equipo: 'A',
+            puntosA: sala.puntosRondaEquipoA,
+            puntosB: sala.puntosRondaEquipoB,
+            mensaje: `¡Equipo A gana la partida! ${sala.puntosRondaEquipoA} - ${sala.puntosRondaEquipoB}`
+        });
+    } else if (sala.puntosRondaEquipoB >= 7) {
+        sala.equipoGanador = 'B';
+        io.to(salaId).emit("partida_ganada", {
+            equipo: 'B',
+            puntosA: sala.puntosRondaEquipoA,
+            puntosB: sala.puntosRondaEquipoB,
+            mensaje: `¡Equipo B gana la partida! ${sala.puntosRondaEquipoB} - ${sala.puntosRondaEquipoA}`
+        });
+    } else {
+        // Nueva mano
+        console.log(`🔄 Iniciando nueva mano... Puntos: A=${sala.puntosRondaEquipoA}, B=${sala.puntosRondaEquipoB}`);
+        setTimeout(() => {
+            nuevaMano(sala);
+        }, 3000);
+    }
 }
 
 // Endpoint para obtener estado de salas
@@ -679,120 +1200,14 @@ io.on('connection', (socket) => {
         io.to(sala.id).emit('usuariosJSON', usersJSON);
     }
     
-    // Función para obtener palo de una carta
+    // Función para obtener palo de una carta (usa la global)
     function getPalo(carta) {
         return carta.split('De')[1];
     }
     
-    // Función para validar si una jugada es legal
+    // Función para validar si una jugada es legal (usa la global)
     function validarJugada(sala, jugador, carta) {
-        const jugadorData = sala.users.get(jugador);
-        if (!jugadorData) return { valida: false, mensaje: "Jugador no encontrado" };
-        
-        const cartasJugador = jugadorData.cartas;
-        const paloCarta = getPalo(carta);
-        const paloTriunfo = sala.ultimaCarta ? getPalo(sala.ultimaCarta) : null;
-        
-        // Si es el primero en jugar (no hay cartas en mesa), cualquier carta es válida
-        if (sala.cartasRonda.length === 0) {
-            return { valida: true };
-        }
-        
-        // Obtener palo de salida (palo de la primera carta jugada)
-        const paloSalida = getPalo(sala.cartasRonda[0].carta);
-        
-        // Si la carta es del palo de salida, verificar si debe superar
-        if (paloCarta === paloSalida) {
-            const cartasPaloEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloSalida);
-            if (cartasPaloEnMesa.length > 0) {
-                const mayorCartaEnMesa = Math.max(...cartasPaloEnMesa.map(j => valorCarta(j.carta)));
-                const valorMiCarta = valorCarta(carta);
-                const misCartasDelPalo = cartasJugador.filter(c => getPalo(c) === paloSalida).map(c => valorCarta(c));
-                const puedoSuperar = misCartasDelPalo.some(v => v > mayorCartaEnMesa);
-                
-                if (valorMiCarta > mayorCartaEnMesa) {
-                    // Sí supera, jugada válida
-                    return { valida: true };
-                } else if (puedoSuperar) {
-                    // Tiene cartas que superan pero no está jugando una de ellas
-                    return {
-                        valida: false,
-                        mensaje: `Debes asistir superando: tienes cartas del palo ${paloSalida} que superan la mesa.`
-                    };
-                }
-            }
-            // No hay cartas del palo en mesa o no puede superar
-            return { valida: true };
-        }
-        
-        // Si no es del palo de salida, verificar si tiene cartas del palo de salida
-        const tienePaloSalida = cartasJugador.some(c => getPalo(c) === paloSalida);
-        if (tienePaloSalida) {
-            return { 
-                valida: false, 
-                mensaje: `Debes asistir: tienes cartas del palo de ${paloSalida}. Obligado a jugar ese palo.` 
-            };
-        }
-        
-        // No tiene palo de salida. Verificar situación de triunfo (fallo)
-        const tieneTriunfo = cartasJugador.some(c => getPalo(c) === paloTriunfo);
-        const cartasTriunfoEnMesa = sala.cartasRonda.filter(j => getPalo(j.carta) === paloTriunfo);
-        const hayTriunfoEnMesa = cartasTriunfoEnMesa.length > 0;
-        
-        if (paloTriunfo && paloCarta === paloTriunfo) {
-            // Está jugando triunfo - verificar si debe superar
-            if (hayTriunfoEnMesa) {
-                const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
-                const valorMiTriunfo = valorCarta(carta);
-                const misTriunfos = cartasJugador.filter(c => getPalo(c) === paloTriunfo).map(c => valorCarta(c));
-                const puedoSuperar = misTriunfos.some(v => v > mayorTriunfoEnMesa);
-                
-                if (valorMiTriunfo > mayorTriunfoEnMesa) {
-                    // Sí supera, jugada válida
-                    return { valida: true, esFallo: true };
-                } else if (puedoSuperar) {
-                    // Tiene triunfos que superan pero no está jugando uno de ellos
-                    return {
-                        valida: false,
-                        mensaje: `Debes fallar superando: tienes triunfos que superan el ${mayorTriunfoEnMesa} en mesa.`
-                    };
-                } else {
-                    // No puede superar, cualquier triunfo es válido
-                    return { valida: true, esFallo: true };
-                }
-            } else {
-                // No hay triunfo en mesa, cualquier triunfo es válido
-                return { valida: true, esFallo: true };
-            }
-        }
-        
-        // No está jugando triunfo. Verificar si debe fallar obligatoriamente
-        if (tieneTriunfo) {
-            if (hayTriunfoEnMesa) {
-                const mayorTriunfoEnMesa = Math.max(...cartasTriunfoEnMesa.map(j => valorCarta(j.carta)));
-                const misTriunfos = cartasJugador.filter(c => getPalo(c) === paloTriunfo).map(c => valorCarta(c));
-                const puedoSuperar = misTriunfos.some(v => v > mayorTriunfoEnMesa);
-                
-                if (puedoSuperar) {
-                    // Tiene triunfos que superan, debe fallar obligatoriamente
-                    return {
-                        valida: false,
-                        mensaje: `Debes fallar superando: tienes triunfos (${paloTriunfo}) que superan el ${mayorTriunfoEnMesa} en mesa.`
-                    };
-                }
-                // No puede superar el triunfo en mesa, no está obligado a fallar
-                return { valida: true, esDescarte: true };
-            } else {
-                // No hay triunfo en mesa, debe fallar obligatoriamente
-                return {
-                    valida: false,
-                    mensaje: `Debes fallar: tienes triunfos (${paloTriunfo}) y no hay triunfo en mesa.`
-                };
-            }
-        }
-        
-        // No tiene palo de salida ni triunfos, puede jugar cualquier otra carta
-        return { valida: true, esDescarte: true };
+        return validarJugadaGlobal(sala, jugador, carta);
     }
     
     // Evento para cantar (cuando un jugador tiene 11 y 12 del mismo palo)
@@ -803,6 +1218,12 @@ io.on('connection', (socket) => {
         
         const jugadorData = sala.users.get(jugador);
         if (!jugadorData) return;
+        
+        // Verificar que el jugador no sea el compañero que no juega (solo/cuatrola/quintola)
+        if (sala.compañeroNoJuega === jugador) {
+            socket.emit("error_jugada", "No puedes cantar si no juegas esta mano");
+            return;
+        }
         
         const equipo = jugadorData.equipo;
         const puntos = datosCantar.puntos;
@@ -853,45 +1274,7 @@ io.on('connection', (socket) => {
     });
     
     // Funciones auxiliares para apuestas
-    function iniciarJuegoNormal(sala, salaId) {
-        console.log(`🎮 iniciarJuegoNormal - sala: ${salaId}, manoIndex: ${sala.manoIndex}`);
-        
-        const jugadoresArray = Array.from(sala.users.entries());
-        const jugadoresInfo = jugadoresArray.map(([id, data]) => ({
-            id, nombre: data.nombre, equipo: data.equipo, cartas: data.cartas
-        }));
-        
-        // El que baraja (manoIndex) tiene el fallo pero NO empieza; empieza el siguiente
-        const primerTurnoIndex = (sala.manoIndex + 1) % 4;
-        const primerJugador = sala.users.get(sala.ordenJugadores[primerTurnoIndex]);
-        
-        // Construir equiposInfo correctamente (sala.users es un Map)
-        const equiposInfo = {};
-        sala.users.forEach((data, id) => {
-            equiposInfo[id] = { equipo: data.equipo, numero: data.numeroJugador };
-        });
-        
-        const primerTurnoId = sala.ordenJugadores[primerTurnoIndex];
-        
-        console.log(`🎮 Emitiendo start_game - primer turno: ${primerTurnoId}, jugador: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
-        
-        io.to(salaId).emit("start_game", 
-            jugadoresInfo, 
-            sala.ultimaCarta, 
-            primerTurnoId,
-            primerJugador ? primerJugador.nombre : '',
-            equiposInfo
-        );
-        sala.juegoActivo = true;
-        
-        // Inicializar el turno actual para la nueva mano
-        sala.turnoActual = primerTurnoIndex;
-        
-        // Si el primer jugador es un bot, hacer que juegue automáticamente
-        if (primerJugador && primerJugador.esBot) {
-            setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
-        }
-    }
+    // NOTA: iniciarJuegoNormal está ahora en scope global (línea 458)
     
     function iniciarJuegoConApuesta(sala, salaId) {
         const jugadoresArray = Array.from(sala.users.entries());
@@ -935,7 +1318,10 @@ io.on('connection', (socket) => {
         
         // Si el primer jugador es un bot, hacer que juegue automáticamente
         if (primerJugador && primerJugador.esBot) {
+            console.log(`🤖 [ConApuesta] Primer jugador es bot: ${primerJugador.nombre}, cartas: ${primerJugador.cartas?.length || 0}`);
             setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+        } else {
+            console.log(`👤 [ConApuesta] Primer jugador es humano: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
         }
     }
     
@@ -1059,30 +1445,49 @@ io.on('connection', (socket) => {
     
     // Evento para jugar carta
     socket.on("carta_seleccionada", (jugador, carta) => {
-        if (!salaActual) return;
+        console.log(`🎴 carta_seleccionada recibida - jugador: ${jugador}, carta: ${carta}`);
+        
+        if (!salaActual) {
+            console.log(`❌ carta_seleccionada: no hay salaActual`);
+            return;
+        }
         const sala = salas.get(salaActual);
-        if (!sala) return;
+        if (!sala) {
+            console.log(`❌ carta_seleccionada: sala no encontrada`);
+            return;
+        }
+        
+        console.log(`📊 Estado actual - cartasRonda: ${sala.cartasRonda.length}, turnoActual: ${sala.turnoActual}`);
+        console.log(`📊 cartasRonda:`, sala.cartasRonda.map(j => ({jugador: j.jugador, carta: j.carta})));
         
         if (sala.faseApuestas) {
+            console.log(`❌ carta_seleccionada: fase de apuestas activa`);
             socket.emit("error_jugada", "Fase de apuestas activa. Debes apostar o pasar.");
             return;
         }
         if (sala.compañeroNoJuega === jugador) {
+            console.log(`❌ carta_seleccionada: compañero no juega`);
             socket.emit("error_jugada", "No juegas esta mano (tu compañero hizo Cuatrola/Quintola)");
             return;
         }
         
         // Verificar si es el turno del jugador
         const jugadorActualId = sala.ordenJugadores[sala.turnoActual];
+        console.log(`👤 Turno actual: ${jugadorActualId}, Jugador que intenta: ${jugador}`);
+        
         if (jugador !== jugadorActualId) {
             const turnoDe = sala.users.get(jugadorActualId);
+            console.log(`❌ carta_seleccionada: no es turno de este jugador`);
             socket.emit("error_turno", `No es tu turno. Le toca a: ${turnoDe ? turnoDe.nombre : 'Otro jugador'}`);
             return;
         }
         
         // Verificar si ya jugó en esta ronda
         const jugadorYaJugo = sala.cartasRonda.some((jugada) => jugada.jugador === jugador);
+        console.log(`🔍 jugadorYaJugo: ${jugadorYaJugo}`);
+        
         if (jugadorYaJugo) {
+            console.log(`❌ carta_seleccionada: jugador ${jugador} ya jugó en esta ronda`);
             socket.emit("error_jugada", "Ya jugaste una carta en esta ronda");
             return;
         }
@@ -1102,8 +1507,9 @@ io.on('connection', (socket) => {
         objetoModificar.cartas = objetoModificar.cartas.filter(cartaOriginal => cartaOriginal !== carta);
         sala.users.set(jugador, objetoModificar);
         
+        // Emitir actualización de cartas a TODOS (igual que en botJugarCarta)
         const usersArray = Array.from(sala.users);
-        socket.emit("quitar_carta_usuario", usersArray);
+        io.to(salaActual).emit("quitar_carta_usuario", usersArray);
         
         sala.cartitasRonda.push(carta);
         io.to(salaActual).emit("mostrar_cartas_mesa", sala.cartitasRonda);
@@ -1190,8 +1596,14 @@ io.on('connection', (socket) => {
             
             if (puedeCantarEnSiguienteBaza && jugadorGanador) {
                 const equipoGanador = jugadorGanador.equipo;
-                const jugadoresDelEquipo = 
-                    Array.from(sala.users.entries()).filter(([id, data]) => data.equipo === equipoGanador);
+                // Filtrar jugadores del equipo ganador, excluyendo al compañero que no juega (solo/cuatrola/quintola)
+                const jugadoresDelEquipo = Array.from(sala.users.entries()).filter(([id, data]) => {
+                    // Debe ser del equipo ganador
+                    if (data.equipo !== equipoGanador) return false;
+                    // No debe ser el compañero que no juega
+                    if (sala.compañeroNoJuega && id === sala.compañeroNoJuega) return false;
+                    return true;
+                });
                 
                 // Asegurar que palosCantados esté inicializado
                 if (!sala.palosCantados) {
@@ -1229,6 +1641,31 @@ io.on('connection', (socket) => {
                 }
             }
             
+            // Calcular puntos de cartas acumulados por cada equipo en esta mano
+            function calcularPuntosCartas(cartasGanadas) {
+                return cartasGanadas.reduce((sum, carta) => {
+                    if (carta === 'DIEZ_MONTES_10') return sum + 10;
+                    if (carta.startsWith('CANTO_')) {
+                        const partes = carta.split('_');
+                        return sum + (parseInt(partes[2]) || 0);
+                    }
+                    const match = carta.match(/\d+/);
+                    if (!match) return sum;
+                    const num = parseInt(match[0]);
+                    switch(num) {
+                        case 1: return sum + 11;
+                        case 3: return sum + 10;
+                        case 10: return sum + 2;
+                        case 11: return sum + 3;
+                        case 12: return sum + 4;
+                        default: return sum;
+                    }
+                }, 0);
+            }
+            
+            const puntosCartasA = calcularPuntosCartas(sala.cartasGanadasEquipoA);
+            const puntosCartasB = calcularPuntosCartas(sala.cartasGanadasEquipoB);
+            
             // Notificar fin de baza con info de cantes disponibles
             console.log('📢 Emitiendo fin_baza a sala:', salaActual);
             console.log('📢 Datos fin_baza:', {
@@ -1241,12 +1678,38 @@ io.on('connection', (socket) => {
                 bazasJugadas: sala.bazasJugadasMano,
                 totalBazas: 5,
                 jugadoresQuePuedenCantar: jugadoresQuePuedenCantar,
-                paloTriunfo: paloTriunfo
+                paloTriunfo: paloTriunfo,
+                bazasPorEquipo: sala.bazasGanadasPorEquipo || { A: 0, B: 0 },
+                puntosCartasPorEquipo: { A: puntosCartasA, B: puntosCartasB }
             });
             
             // Limpiar mesa para siguiente baza
             sala.cartasRonda = [];
             sala.cartitasRonda = [];
+            
+            // Si no terminó la mano, iniciar siguiente baza (el ganador empieza)
+            if (sala.bazasJugadasMano < 5) {
+                // Encontrar índice del ganador en el orden de jugadores
+                const indexGanador = sala.ordenJugadores.indexOf(ganador_baza.jugador);
+                if (indexGanador !== -1) {
+                    sala.turnoActual = indexGanador;
+                    const primerTurnoId = sala.ordenJugadores[sala.turnoActual];
+                    const primerJugador = sala.users.get(primerTurnoId);
+                    
+                    console.log(`🎮 Nueva baza iniciada. Primer turno: ${primerJugador ? primerJugador.nombre : 'unknown'} (ganador de baza anterior)`);
+                    
+                    // Pequeño delay para que los jugadores vean el resultado antes de empezar
+                    setTimeout(() => {
+                        io.to(salaActual).emit("cambio_turno", primerTurnoId, primerJugador ? primerJugador.nombre : '');
+                        io.to(salaActual).emit("vaciar_mesa");
+                        
+                        // Si el primer jugador es un bot, hacer que juegue automáticamente
+                        if (primerJugador && primerJugador.esBot) {
+                            setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+                        }
+                    }, 3000); // 3 segundos para que se vea el resultado y se pueda cantar
+                }
+            }
             
             // Verificar si terminó la MANO (5 bazas)
             if (sala.bazasJugadasMano >= 5) {
@@ -1318,12 +1781,19 @@ io.on('connection', (socket) => {
                 
                 if (ganadorRonda !== 'EMPATE') {
                     if (ganadorRonda === 'A') {
-                        sala.puntosRondaEquipoA += puntosRondaGanados;
-                        // Mesa limpia solo aplica en juego normal (sin apuesta especial)
-                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'A') sala.puntosRondaEquipoA += 2;
+                        // Mesa limpia da 2 puntos, no 3 (sobrescribe el punto normal)
+                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'A') {
+                            sala.puntosRondaEquipoA += 2;
+                        } else {
+                            sala.puntosRondaEquipoA += puntosRondaGanados;
+                        }
                     } else {
-                        sala.puntosRondaEquipoB += puntosRondaGanados;
-                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'B') sala.puntosRondaEquipoB += 2;
+                        // Mesa limpia da 2 puntos, no 3 (sobrescribe el punto normal)
+                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'B') {
+                            sala.puntosRondaEquipoB += 2;
+                        } else {
+                            sala.puntosRondaEquipoB += puntosRondaGanados;
+                        }
                     }
                 }
                 
@@ -1401,93 +1871,6 @@ io.on('connection', (socket) => {
             io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
         }
     });
-    
-    // Función para iniciar una nueva mano (repartir cartas nuevas)
-    function nuevaMano(sala) {
-        console.log(`🆕 Nueva mano en ${sala.id} - iniciando fase de apuestas`);
-        
-        // El mano pasa al jugador de la derecha (siguiente en orden)
-        // El que gana la última baza era el mano de esta mano, ahora pasa al siguiente
-        sala.manoIndex = (sala.manoIndex + 1) % 4;
-        sala.turnoActual = (sala.manoIndex + 1) % 4; // El que baraja tiene el fallo, el siguiente empieza
-        
-        console.log(`🎲 Nuevo mano: índice ${sala.manoIndex}, jugador ${sala.ordenJugadores[sala.manoIndex]}`);
-        
-        // Resetear cartas ganadas y contadores de bazas
-        sala.cartasGanadasEquipoA = [];
-        sala.cartasGanadasEquipoB = [];
-        sala.bazasJugadasMano = 0;
-        sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
-        sala.cartasRonda = [];
-        sala.cartitasRonda = [];
-        
-        // Resetear sistema de apuestas para la nueva mano
-        sala.faseApuestas = true;
-        sala.apuestas = [];
-        sala.apuestaActual = null;
-        sala.jugadoresPasaron.clear();
-        sala.cuatrolaActiva = null;
-        sala.compañeroNoJuega = null;
-        sala.cuatrolaBazasGanadas = 0;
-        sala.juegoActivo = false;
-        
-        // Resetear cantes para la nueva mano
-        sala.palosCantados = { A: [], B: [] };
-        
-        // Repartir nuevas cartas
-        let arrayCartitas = repartirCartas();
-        let i = 0;
-        
-        sala.users.forEach((valor, clave) => {
-            valor.cartas = arrayCartitas[i];
-            valor.noJuega = false; // Resetear flag de no jugar
-            i++;
-        });
-        
-        sala.ultimaCarta = arrayCartitas[sala.manoIndex][4];
-        const usersArray = Array.from(sala.users);
-        
-        // El que baraja tiene el fallo pero NO empieza; empieza el siguiente
-        const primerTurno = sala.ordenJugadores[(sala.manoIndex + 1) % 4];
-        const primerJugador = sala.users.get(primerTurno);
-        
-        // Enviar cartas a cada jugador ANTES de la fase de apuestas
-        sala.users.forEach((valor, clave) => {
-            io.to(clave).emit('mis_cartas_apuestas', {
-                cartas: valor.cartas,
-                ultimaCarta: sala.ultimaCarta,
-                mensaje: 'Tus cartas para decidir tu apuesta'
-            });
-        });
-        
-        // Iniciar fase de apuestas (igual que al inicio del juego)
-        const jugadoresInfo = sala.ordenJugadores.map(id => {
-            const j = sala.users.get(id);
-            return { id, nombre: j ? j.nombre : '', equipo: j ? j.equipo : '' };
-        });
-        
-        console.log(`📤 Emitiendo fase_apuestas - mano: ${primerTurno}, turnoApuesta: ${primerTurno}, manoIndex: ${sala.manoIndex}`);
-        
-        // Jugador que tiene el fallo (quien baraja = manoIndex)
-        const jugadorFalloNuevaMano = sala.users.get(sala.ordenJugadores[sala.manoIndex]);
-        
-        io.to(sala.id).emit('fase_apuestas', {
-            jugadores: jugadoresInfo,
-            mano: { id: primerTurno, nombre: primerJugador ? primerJugador.nombre : '' },
-            turnoApuesta: primerTurno,
-            ordenApuestas: sala.ordenJugadores,
-            mensaje: 'Fase de apuestas: Elige Solo (2pts), Cuatrola (4pts), Quintola (5pts), o Paso',
-            puntosRondaA: sala.puntosRondaEquipoA,
-            puntosRondaB: sala.puntosRondaEquipoB,
-            jugadorFalloNombre: jugadorFalloNuevaMano ? jugadorFalloNuevaMano.nombre : '',
-            jugadorFalloId: sala.ordenJugadores[sala.manoIndex]
-        });
-        
-        // Si el primer jugador en apostar es un bot, hacer que apueste automáticamente
-        if (primerJugador && primerJugador.esBot) {
-            setTimeout(() => botRealizarApuesta(sala, primerTurno), 2000);
-        }
-    }
     
     // Evento para limpiar mesa
     socket.on("limpiar_mesa", () => {
@@ -1655,6 +2038,90 @@ io.on('connection', (socket) => {
             }
         }
     });
+});
+
+// ========== ENDPOINTS DE AUTENTICACIÓN ==========
+
+// Registro
+app.post('/api/auth/register', async (req, res) => {
+    const { username, email, password } = req.body;
+    
+    if (!username || !email || !password) {
+        return res.status(400).json({ error: 'Faltan campos requeridos' });
+    }
+    
+    if (password.length < 6) {
+        return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+    }
+    
+    const result = await register(username, email, password);
+    
+    if (result.success) {
+        res.json(result);
+    } else {
+        res.status(400).json(result);
+    }
+});
+
+// Login
+app.post('/api/auth/login', async (req, res) => {
+    const { usernameOrEmail, password } = req.body;
+    
+    if (!usernameOrEmail || !password) {
+        return res.status(400).json({ error: 'Faltan campos requeridos' });
+    }
+    
+    const result = await login(usernameOrEmail, password);
+    
+    if (result.success) {
+        res.json(result);
+    } else {
+        res.status(401).json(result);
+    }
+});
+
+// Perfil (requiere autenticación)
+app.get('/api/auth/profile', authMiddleware, (req, res) => {
+    const token = req.headers.authorization.split(' ')[1];
+    const result = getProfile(token);
+    
+    if (result.success) {
+        res.json(result);
+    } else {
+        res.status(401).json(result);
+    }
+});
+
+// Actualizar estadísticas (requiere autenticación)
+app.post('/api/stats/update', authMiddleware, (req, res) => {
+    const { gamesPlayed, gamesWon, handsWon, totalPoints, mesasLimpias, cantes } = req.body;
+    
+    const result = updateStats(req.userId, {
+        gamesPlayed: gamesPlayed || 0,
+        gamesWon: gamesWon || 0,
+        handsWon: handsWon || 0,
+        totalPoints: totalPoints || 0,
+        mesasLimpias: mesasLimpias || 0,
+        cantes: cantes || 0
+    });
+    
+    if (result.success) {
+        res.json(result);
+    } else {
+        res.status(400).json(result);
+    }
+});
+
+// Ranking (público)
+app.get('/api/leaderboard', (req, res) => {
+    const limit = parseInt(req.query.limit) || 20;
+    const result = getLeaderboard(limit);
+    res.json(result);
+});
+
+// Health check
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 server.listen(PORT)

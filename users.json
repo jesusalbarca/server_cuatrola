@@ -1,0 +1,19 @@
+{
+  "users": [
+    {
+      "id": "mppywyxp8yjmw5x9ilh",
+      "username": "jesus",
+      "email": "jesusjesus1999@gmail.com",
+      "password": "$2b$10$8EtENMeRmW9stLH8fiyyZePBTL1DJqy.mHL.SQ6aYfK96LVb0Ywyu",
+      "createdAt": "2026-05-28T20:51:08.126Z",
+      "stats": {
+        "gamesPlayed": 0,
+        "gamesWon": 0,
+        "handsWon": 0,
+        "totalPoints": 0,
+        "mesasLimpias": 0,
+        "cantes": 0
+      }
+    }
+  ]
+}
