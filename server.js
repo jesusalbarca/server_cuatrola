@@ -921,6 +921,8 @@ function procesarFinMano(sala, salaId) {
             puntosB: sala.puntosRondaEquipoB,
             mensaje: `¡Equipo A gana la partida! ${sala.puntosRondaEquipoA} - ${sala.puntosRondaEquipoB}`
         });
+        sala.juegoIniciado = false;
+        sala.juegoActivo = false;
     } else if (sala.puntosRondaEquipoB >= 7) {
         sala.equipoGanador = 'B';
         io.to(salaId).emit("partida_ganada", {
@@ -929,6 +931,8 @@ function procesarFinMano(sala, salaId) {
             puntosB: sala.puntosRondaEquipoB,
             mensaje: `¡Equipo B gana la partida! ${sala.puntosRondaEquipoB} - ${sala.puntosRondaEquipoA}`
         });
+        sala.juegoIniciado = false;
+        sala.juegoActivo = false;
     } else {
         // Nueva mano
         console.log(`🔄 Iniciando nueva mano... Puntos: A=${sala.puntosRondaEquipoA}, B=${sala.puntosRondaEquipoB}`);
@@ -1656,6 +1660,44 @@ io.on('connection', (socket) => {
         });
     });
 
+    // Salida voluntaria de sala (al terminar partida)
+    socket.on("salir_sala", () => {
+        if (!salaActual) return;
+        const sala = salas.get(salaActual);
+        if (!sala) return;
+
+        const jugador = sala.users.get(socket.id);
+        const nombreJugador = jugador ? jugador.nombre : 'Jugador';
+
+        sala.users.delete(socket.id);
+        socket.leave(salaActual);
+
+        io.emit("salas_actualizado", { salaId: salaActual, contador: sala.users.size });
+        console.log(`🚪 ${nombreJugador} salió de ${salaActual}. Quedan: ${sala.users.size}`);
+
+        if (sala.users.size === 0) {
+            eliminarBotsDeSala(sala);
+            sala.juegoIniciado = false;
+            sala.juegoActivo = false;
+            sala.cartasRonda = [];
+            sala.cartitasRonda = [];
+            sala.ultimaCarta = null;
+            sala.todos_limpian = 0;
+            sala.turnoActual = 0;
+            sala.ordenJugadores = [];
+            sala.puntosRondaEquipoA = 0;
+            sala.puntosRondaEquipoB = 0;
+            sala.equipoGanador = null;
+            sala.cartasGanadasEquipoA = [];
+            sala.cartasGanadasEquipoB = [];
+            sala.bazasJugadasMano = 0;
+            sala.ganadorUltimaBaza = null;
+            console.log(`🔄 Sala ${salaActual} reseteada completamente`);
+        }
+
+        salaActual = null;
+    });
+
     // Desconexión
     socket.on("disconnect", () => {
         console.log("Desconectado: " + socket.id);
@@ -1744,13 +1786,22 @@ io.on('connection', (socket) => {
                 
                 // Si la sala quedó vacía, reiniciar completamente
                 if (sala.users.size === 0) {
+                    eliminarBotsDeSala(sala);
                     sala.juegoIniciado = false;
+                    sala.juegoActivo = false;
                     sala.cartasRonda = [];
                     sala.cartitasRonda = [];
                     sala.ultimaCarta = null;
                     sala.todos_limpian = 0;
                     sala.turnoActual = 0;
                     sala.ordenJugadores = [];
+                    sala.puntosRondaEquipoA = 0;
+                    sala.puntosRondaEquipoB = 0;
+                    sala.equipoGanador = null;
+                    sala.cartasGanadasEquipoA = [];
+                    sala.cartasGanadasEquipoB = [];
+                    sala.bazasJugadasMano = 0;
+                    sala.ganadorUltimaBaza = null;
                 }
             }
         }
