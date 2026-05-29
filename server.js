@@ -133,6 +133,9 @@ for (let i = 1; i <= MAX_SALAS; i++) {
 // Clave: nombre+sala, Valor: { datos, salaId, timeout }
 const jugadoresDesconectados = new Map();
 
+// Sesiones activas: Clave: userId, Valor: token
+const activeSessions = new Map();
+
 // Función global para validar jugadas (disponible para bots y jugadores)
 function validarJugadaGlobal(sala, jugador, carta) {
     const jugadorData = sala.users.get(jugador);
@@ -769,19 +772,22 @@ function procesarFinBaza(sala, salaId) {
 
             console.log(`🎮 Nueva baza iniciada. Primer turno: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
 
+            // Emitir cambio_turno INMEDIATAMENTE para que todos sepan a quién le toca
+            // (ya no se espera el timeout de 3 segundos para esto)
+            io.to(salaId).emit("cambio_turno", primerTurnoId, primerJugador ? primerJugador.nombre : '');
+
             setTimeout(() => {
-                // Si ya se jugó una carta en la nueva baza, no sobreescribir el turno ni limpiar la mesa
+                // Si ya se jugó una carta en la nueva baza, no limpiar la mesa (el jugador ya jugó)
                 if (sala.cartasRonda.length > 0 || sala.bazasJugadasMano !== bazaAlIniciar) {
                     console.log(`⚠️ Timeout baza ignorado: ya hay ${sala.cartasRonda.length} cartas en mesa o baza avanzó`);
                     return;
                 }
-                io.to(salaId).emit("cambio_turno", primerTurnoId, primerJugador ? primerJugador.nombre : '');
                 io.to(salaId).emit("vaciar_mesa");
 
                 if (primerJugador && primerJugador.esBot) {
-                    setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
+                    setTimeout(() => botJugarCarta(sala, primerTurnoId), 500);
                 }
-            }, 3000);
+            }, 1500);
         }
     } else {
         // Fin de MANO (5 bazas completadas)
@@ -1750,18 +1756,28 @@ app.post('/api/auth/register', async (req, res) => {
 // Login
 app.post('/api/auth/login', async (req, res) => {
     const { usernameOrEmail, password } = req.body;
-    
+
     if (!usernameOrEmail || !password) {
         return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
-    
+
     const result = await login(usernameOrEmail, password);
-    
+
     if (result.success) {
+        if (activeSessions.has(result.user.id)) {
+            return res.status(409).json({ success: false, error: 'Ya existe una sesión activa para este usuario. Cierra la sesión anterior antes de iniciar una nueva.' });
+        }
+        activeSessions.set(result.user.id, result.token);
         res.json(result);
     } else {
         res.status(401).json(result);
     }
+});
+
+// Logout
+app.post('/api/auth/logout', authMiddleware, (req, res) => {
+    activeSessions.delete(req.userId);
+    res.json({ success: true });
 });
 
 // Perfil (requiere autenticación)
