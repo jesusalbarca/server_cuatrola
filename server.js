@@ -2,7 +2,7 @@ import express from "express";
 import { Server as SocketServer } from "socket.io";
 import http from 'http'
 import cors from 'cors'
-import { register, login, getProfile, updateStats, getLeaderboard, authMiddleware } from './auth.js';
+import { register, login, getProfile, updateStats, resetStats, getLeaderboard, authMiddleware, ensureDefaultUsers } from './auth.js';
 
 const PORT = process.env.PORT || 4000
 
@@ -563,6 +563,11 @@ function botJugarCarta(sala, botId) {
     
     // Ejecutar la jugada
     setTimeout(() => {
+        // Verificar que sigue siendo el turno de este bot (podría haber cambiado si el juego avanzó)
+        if (sala.ordenJugadores[sala.turnoActual] !== botId) {
+            console.log(`⚠️ botJugarCarta (timeout): ya no es el turno de ${bot.nombre}, ignorando`);
+            return;
+        }
         // Releer cartas actuales del bot (puede haber cambiado desde que se programó el timeout)
         const cartasActuales = bot.cartas;
         if (!cartasActuales || cartasActuales.length === 0) {
@@ -675,7 +680,10 @@ function procesarFinBaza(sala, salaId) {
     
     // Verificar si algún jugador del equipo ganador puede cantar
     const jugadoresQuePuedenCantar = [];
-    const puedeCantarEnSiguienteBaza = sala.bazasJugadasMano >= 1 && sala.bazasJugadasMano <= 3;
+    // En cuatrola/quintola nadie puede cantar (la mano se gana por bazas, no por cantes)
+    const hayCuatrolaOQuintola = sala.cuatrolaActiva &&
+        (sala.cuatrolaActiva.tipo === 'cuatrola' || sala.cuatrolaActiva.tipo === 'quintola');
+    const puedeCantarEnSiguienteBaza = sala.bazasJugadasMano >= 1 && sala.bazasJugadasMano <= 3 && !hayCuatrolaOQuintola;
     
     if (puedeCantarEnSiguienteBaza && jugadorGanador) {
         const equipoGanador = jugadorGanador.equipo;
@@ -948,6 +956,11 @@ app.get('/', (req, res) => {
 io.on('connection', (socket) => {
     console.log("Nuevo cliente: " + socket.id);
     let salaActual = null;
+
+    // Enviar estado actual de todas las salas al cliente recién conectado
+    salas.forEach((sala, salaId) => {
+        socket.emit("salas_actualizado", { salaId, contador: sala.users.size });
+    });
 
     // Evento para unirse a una sala
     socket.on("unirse_sala", (numeroSala, nombre) => {
@@ -1237,14 +1250,22 @@ io.on('connection', (socket) => {
     }
     
     // Evento para cantar (cuando un jugador tiene 11 y 12 del mismo palo)
-    socket.on("cantar", (jugador, datosCantar) => {
+    socket.on("cantar", (_jugadorIgnorado, datosCantar) => {
+        const jugador = socket.id; // Siempre usar socket.id del servidor
         if (!salaActual) return;
         const sala = salas.get(salaActual);
         if (!sala) return;
         
         const jugadorData = sala.users.get(jugador);
         if (!jugadorData) return;
-        
+
+        // En cuatrola/quintola nadie puede cantar
+        if (sala.cuatrolaActiva &&
+            (sala.cuatrolaActiva.tipo === 'cuatrola' || sala.cuatrolaActiva.tipo === 'quintola')) {
+            socket.emit("error_jugada", "No se puede cantar cuando hay Cuatrola o Quintola activa");
+            return;
+        }
+
         // Verificar que el jugador no sea el compañero que no juega (solo/cuatrola/quintola)
         if (sala.compañeroNoJuega === jugador) {
             socket.emit("error_jugada", "No puedes cantar si no juegas esta mano");
@@ -1352,7 +1373,8 @@ io.on('connection', (socket) => {
     }
     
     // Evento para realizar apuesta
-    socket.on("realizar_apuesta", (jugador, tipoApuesta) => {
+    socket.on("realizar_apuesta", (_jugadorIgnorado, tipoApuesta) => {
+        const jugador = socket.id; // Siempre usar socket.id del servidor
         console.log(`💰 realizar_apuesta - jugador: ${jugador}, tipo: ${tipoApuesta}`);
         
         if (!salaActual) {
@@ -1470,7 +1492,8 @@ io.on('connection', (socket) => {
     });
     
     // Evento para jugar carta
-    socket.on("carta_seleccionada", (jugador, carta) => {
+    socket.on("carta_seleccionada", (_jugadorIgnorado, carta) => {
+        const jugador = socket.id; // Siempre usar socket.id del servidor, ignorar el del cliente
         console.log(`🎴 carta_seleccionada recibida - jugador: ${jugador}, carta: ${carta}`);
         
         if (!salaActual) {
@@ -1593,6 +1616,7 @@ io.on('connection', (socket) => {
         
         // Restaurar jugador con el nuevo socket ID
         const datosJugador = guardado.datos;
+        datosJugador.socketId = socket.id; // Actualizar el campo socketId al nuevo id
         sala.users.set(socket.id, datosJugador);
         
         // Actualizar ordenJugadores sustituyendo el socket viejo por el nuevo
@@ -1655,6 +1679,7 @@ io.on('connection', (socket) => {
                                 nombre: nombreJugador,
                                 mensaje: `${nombreJugador} ha abandonado el juego`
                             });
+                            io.emit("salas_actualizado", { salaId: salaActual, contador: salaAun.users.size });
                             eliminarBotsDeSala(salaAun);
                             if (salaAun.juegoIniciado && salaAun.users.size < 4) {
                                 salaAun.juegoIniciado = false;
@@ -1701,6 +1726,8 @@ io.on('connection', (socket) => {
                     jugadores: usersArray,
                     contador: sala.users.size
                 });
+                // Notificar a TODOS los clientes (pantalla de salas) el nuevo contador
+                io.emit("salas_actualizado", { salaId: salaActual, contador: sala.users.size });
                 
                 // Si el juego estaba iniciado y quedan menos de 4, terminar juego
                 eliminarBotsDeSala(sala);
@@ -1812,6 +1839,16 @@ app.post('/api/stats/update', authMiddleware, (req, res) => {
     }
 });
 
+// Resetear estadísticas propias
+app.post('/api/stats/reset', authMiddleware, (req, res) => {
+    const result = resetStats(req.userId);
+    if (result.success) {
+        res.json(result);
+    } else {
+        res.status(400).json(result);
+    }
+});
+
 // Ranking (público)
 app.get('/api/leaderboard', (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
@@ -1824,5 +1861,7 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-server.listen(PORT)
-console.log('Server iniciado en puerto: ', PORT)
+server.listen(PORT, async () => {
+    console.log('Server iniciado en puerto: ', PORT);
+    await ensureDefaultUsers();
+});

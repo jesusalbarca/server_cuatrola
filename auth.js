@@ -65,7 +65,7 @@ export async function register(username, email, password) {
     
     // Crear usuario
     const user = {
-        id: Date.now().toString(36) + Math.random().toString(36).substr(2),
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2),
         username,
         email,
         password: hashedPassword,
@@ -159,6 +159,48 @@ export function updateStats(userId, stats) {
     }
     
     return { success: true };
+}
+
+// Resetear estadísticas a cero
+export function resetStats(userId) {
+    const data = readUsers();
+    const userIndex = data.users.findIndex(u => u.id === userId);
+
+    if (userIndex === -1) {
+        return { success: false, error: 'Usuario no encontrado' };
+    }
+
+    data.users[userIndex].stats = {
+        gamesPlayed: 0,
+        gamesWon: 0,
+        handsWon: 0,
+        totalPoints: 0,
+        mesasLimpias: 0,
+        cantes: 0
+    };
+
+    if (!saveUsers(data)) {
+        return { success: false, error: 'Error guardando estadísticas' };
+    }
+
+    return { success: true };
+}
+
+// Crear usuarios de prueba por defecto si no existen (se llama al arrancar el servidor)
+export async function ensureDefaultUsers() {
+    const defaults = [
+        { username: 'a', email: 'a@a.a', password: '111111' },
+        { username: 'b', email: 'b@b.b', password: '111111' },
+        { username: 'c', email: 'c@c.c', password: '111111' },
+        { username: 'd', email: 'd@d.d', password: '111111' },
+    ];
+    for (const u of defaults) {
+        const data = readUsers();
+        if (!data.users.find(x => x.username === u.username)) {
+            await register(u.username, u.email, u.password);
+            console.log(`✅ Usuario por defecto creado: ${u.username}`);
+        }
+    }
 }
 
 // Obtener ranking (top jugadores)
