@@ -560,26 +560,43 @@ function botJugarCarta(sala, botId) {
     
     // Ejecutar la jugada
     setTimeout(() => {
+        // Releer cartas actuales del bot (puede haber cambiado desde que se programó el timeout)
+        const cartasActuales = bot.cartas;
+        if (!cartasActuales || cartasActuales.length === 0) {
+            console.log(`❌ botJugarCarta (timeout): ${bot.nombre} ya no tiene cartas`);
+            return;
+        }
+        // Si la carta seleccionada ya no está disponible, recalcular
+        if (!cartasActuales.includes(cartaAJugar)) {
+            cartaAJugar = cartasActuales[0];
+        }
         // Validar jugada usando la función global
         const validacion = validarJugadaGlobal(sala, botId, cartaAJugar);
         if (!validacion.valida) {
             console.log(`🤖 ${bot.nombre} jugada inválida: ${validacion.mensaje}. Intentando otra carta...`);
-            // Si la jugada es inválida, intentar con otra carta
-            for (const otraCarta of cartasJugador) {
+            let cartaValidaEncontrada = false;
+            for (const otraCarta of cartasActuales) {
                 const val = validarJugadaGlobal(sala, botId, otraCarta);
                 if (val.valida) {
                     cartaAJugar = otraCarta;
+                    cartaValidaEncontrada = true;
                     break;
                 }
             }
+            if (!cartaValidaEncontrada) {
+                console.error(`🤖 ${bot.nombre} no tiene cartas válidas, forzando primera carta`);
+                cartaAJugar = cartasActuales[0];
+            }
         }
-        
+
         // Realizar la jugada
         let jugada = { jugador: botId, carta: cartaAJugar };
         sala.cartasRonda.push(jugada);
-        
-        // Quitar carta del bot
-        bot.cartas = bot.cartas.filter(c => c !== cartaAJugar);
+
+        // Quitar carta del bot (inmutable, igual que jugadores humanos)
+        const botActualizado = Object.assign({}, bot);
+        botActualizado.cartas = bot.cartas.filter(c => c !== cartaAJugar);
+        sala.users.set(botId, botActualizado);
         
         // Emitir actualización de cartas a todos (igual que en carta_seleccionada)
         const usersArray = Array.from(sala.users);
@@ -597,21 +614,16 @@ function botJugarCarta(sala, botId) {
         const siguienteTurnoId = sala.ordenJugadores[sala.turnoActual];
         const siguienteJugador = sala.users.get(siguienteTurnoId);
         
-        // Emitir cambio de turno
-        io.to(sala.id).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
-        
-        // Si el siguiente es un bot, que juegue también
-        if (siguienteJugador && siguienteJugador.esBot) {
-            const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
-            if (sala.cartasRonda.length < cartasNecesarias) {
-                setTimeout(() => botJugarCarta(sala, siguienteTurnoId), 1500);
-            }
-        }
-        
         // Verificar si todos jugaron
         const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
         if (sala.cartasRonda.length === cartasNecesarias) {
             procesarFinBaza(sala, sala.id);
+        } else {
+            // Notificar cambio de turno solo cuando la baza NO está completa
+            io.to(sala.id).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
+            if (siguienteJugador && siguienteJugador.esBot) {
+                setTimeout(() => botJugarCarta(sala, siguienteTurnoId), 1500);
+            }
         }
     }, 1500 + Math.random() * 1000);
 }
@@ -1522,353 +1534,15 @@ io.on('connection', (socket) => {
         const siguienteTurnoId = sala.ordenJugadores[sala.turnoActual];
         const siguienteJugador = sala.users.get(siguienteTurnoId);
         
-        // Notificar cambio de turno
-        io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
-        
-        // Si el siguiente jugador es un bot, hacer que juegue automáticamente
-        if (siguienteJugador && siguienteJugador.esBot) {
-            const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
-            if (sala.cartasRonda.length < cartasNecesarias) {
+        const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
+        if (sala.cartasRonda.length === cartasNecesarias) {
+            procesarFinBaza(sala, salaActual);
+        } else {
+            // Notificar cambio de turno solo cuando la baza NO está completa
+            io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
+            if (siguienteJugador && siguienteJugador.esBot) {
                 setTimeout(() => botJugarCarta(sala, siguienteTurnoId), 1500);
             }
-        }
-        
-        const cartasNecesarias = sala.compañeroNoJuega ? 3 : 4;
-        // Si todos jugaron, calcular ganador de la BAZA
-        if (sala.cartasRonda.length === cartasNecesarias) {
-            console.log(`🎲 Calculando ganador de baza ${sala.bazasJugadasMano + 1}/5`);
-            console.log('Cartas en mesa:', sala.cartasRonda);
-            console.log('Última carta (fallo):', sala.ultimaCarta);
-            
-            let ganador_baza;
-            try {
-                ganador_baza = calcularGanadorRonda(sala.ultimaCarta, sala.cartasRonda, sala.users);
-                console.log('✅ Ganador calculado:', ganador_baza);
-            } catch (error) {
-                console.error('❌ Error al calcular ganador:', error);
-                // Fallback: primer jugador gana
-                ganador_baza = { 
-                    jugador: sala.cartasRonda[0].jugador, 
-                    carta: sala.cartasRonda[0].carta,
-                    jugador_name: sala.users.get(sala.cartasRonda[0].jugador)?.nombre || 'Desconocido'
-                };
-            }
-            
-            // Acumular cartas ganadas al equipo correspondiente
-            const jugadorGanador = sala.users.get(ganador_baza.jugador);
-            const cartasDeLaBaza = sala.cartasRonda.map(j => j.carta);
-            const esUltimaBaza = sala.bazasJugadasMano + 1 >= (sala.compañeroNoJuega ? 5 : 5);
-            
-            if (jugadorGanador) {
-                if (jugadorGanador.equipo === 'A') {
-                    sala.cartasGanadasEquipoA.push(...cartasDeLaBaza);
-                    // 10 de Montes: última baza suma 10 puntos extra
-                    if (esUltimaBaza) sala.cartasGanadasEquipoA.push('DIEZ_MONTES_10');
-                } else {
-                    sala.cartasGanadasEquipoB.push(...cartasDeLaBaza);
-                    if (esUltimaBaza) sala.cartasGanadasEquipoB.push('DIEZ_MONTES_10');
-                }
-            }
-            
-            sala.bazasJugadasMano++;
-            sala.ganadorUltimaBaza = ganador_baza.jugador;
-            
-            // Conteo de bazas por equipo para mesa limpia
-            if (!sala.bazasGanadasPorEquipo) sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
-            if (jugadorGanador) sala.bazasGanadasPorEquipo[jugadorGanador.equipo]++;
-            
-            // Calcular palo de triunfo para emitir en fin_baza
-            const paloTriunfo = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
-            
-            // Verificar si algún jugador del equipo ganador puede cantar
-            // REGLA: Solo se puede cantar al inicio de bazas 2, 3 y 4
-            // - Baza 1: No (nadie ha ganado antes)
-            // - Bazas 2,3,4: SÍ (el equipo ganador de la baza anterior puede cantar)
-            // - Baza 5: No (es la última, no hay siguiente baza)
-            const jugadoresQuePuedenCantar = [];
-            
-            // bazasJugadasMano ya se incrementó, entonces:
-            // 1 = terminó baza 1 → próxima es baza 2 → se PUEDE cantar
-            // 2 = terminó baza 2 → próxima es baza 3 → se PUEDE cantar  
-            // 3 = terminó baza 3 → próxima es baza 4 → se PUEDE cantar
-            // 4 = terminó baza 4 → próxima es baza 5 → NO se puede cantar (última)
-            const puedeCantarEnSiguienteBaza = sala.bazasJugadasMano >= 1 && sala.bazasJugadasMano <= 3;
-            
-            if (puedeCantarEnSiguienteBaza && jugadorGanador) {
-                const equipoGanador = jugadorGanador.equipo;
-                // Filtrar jugadores del equipo ganador, excluyendo al compañero que no juega (solo/cuatrola/quintola)
-                const jugadoresDelEquipo = Array.from(sala.users.entries()).filter(([id, data]) => {
-                    // Debe ser del equipo ganador
-                    if (data.equipo !== equipoGanador) return false;
-                    // No debe ser el compañero que no juega
-                    if (sala.compañeroNoJuega && id === sala.compañeroNoJuega) return false;
-                    return true;
-                });
-                
-                // Asegurar que palosCantados esté inicializado
-                if (!sala.palosCantados) {
-                    sala.palosCantados = { A: [], B: [] };
-                }
-                
-                // Función para verificar si un jugador puede cantar
-                // Excluir palos que ya han sido cantados por el equipo
-                function verificarCantar(cartasJugador) {
-                    const palos = ['Bastos', 'Copas', 'Espadas', 'Oros'];
-                    for (const palo of palos) {
-                        // Verificar que no se haya cantado ya este palo
-                        if (sala.palosCantados[equipoGanador].includes(palo)) {
-                            continue;
-                        }
-                        const tiene11 = cartasJugador.some(c => c === `11De${palo}`);
-                        const tiene12 = cartasJugador.some(c => c === `12De${palo}`);
-                        if (tiene11 && tiene12) {
-                            const esPaloTriunfo = paloTriunfo && palo === paloTriunfo;
-                            return { puede: true, palo: palo, esTriunfo: esPaloTriunfo, puntos: esPaloTriunfo ? 40 : 20 };
-                        }
-                    }
-                    return { puede: false };
-                }
-                
-                for (const [id, data] of jugadoresDelEquipo) {
-                    const cantarInfo = verificarCantar(data.cartas);
-                    if (cantarInfo.puede) {
-                        jugadoresQuePuedenCantar.push({
-                            jugadorId: id,
-                            jugadorName: data.nombre,
-                            ...cantarInfo
-                        });
-                    }
-                }
-            }
-            
-            // Calcular puntos de cartas acumulados por cada equipo en esta mano
-            function calcularPuntosCartas(cartasGanadas) {
-                return cartasGanadas.reduce((sum, carta) => {
-                    if (carta === 'DIEZ_MONTES_10') return sum + 10;
-                    if (carta.startsWith('CANTO_')) {
-                        const partes = carta.split('_');
-                        return sum + (parseInt(partes[2]) || 0);
-                    }
-                    const match = carta.match(/\d+/);
-                    if (!match) return sum;
-                    const num = parseInt(match[0]);
-                    switch(num) {
-                        case 1: return sum + 11;
-                        case 3: return sum + 10;
-                        case 10: return sum + 2;
-                        case 11: return sum + 3;
-                        case 12: return sum + 4;
-                        default: return sum;
-                    }
-                }, 0);
-            }
-            
-            const puntosCartasA = calcularPuntosCartas(sala.cartasGanadasEquipoA);
-            const puntosCartasB = calcularPuntosCartas(sala.cartasGanadasEquipoB);
-            
-            // Notificar fin de baza con info de cantes disponibles
-            console.log('📢 Emitiendo fin_baza a sala:', salaActual);
-            console.log('📢 Datos fin_baza:', {
-                ganador: ganador_baza,
-                bazasJugadas: sala.bazasJugadasMano,
-                jugadoresQuePuedenCantar: jugadoresQuePuedenCantar.length
-            });
-            io.to(salaActual).emit("fin_baza", {
-                ganador: ganador_baza,
-                bazasJugadas: sala.bazasJugadasMano,
-                totalBazas: 5,
-                jugadoresQuePuedenCantar: jugadoresQuePuedenCantar,
-                paloTriunfo: paloTriunfo,
-                bazasPorEquipo: sala.bazasGanadasPorEquipo || { A: 0, B: 0 },
-                puntosCartasPorEquipo: { A: puntosCartasA, B: puntosCartasB }
-            });
-            
-            // Limpiar mesa para siguiente baza
-            sala.cartasRonda = [];
-            sala.cartitasRonda = [];
-            
-            // Si no terminó la mano, iniciar siguiente baza (el ganador empieza)
-            if (sala.bazasJugadasMano < 5) {
-                // Encontrar índice del ganador en el orden de jugadores
-                const indexGanador = sala.ordenJugadores.indexOf(ganador_baza.jugador);
-                if (indexGanador !== -1) {
-                    sala.turnoActual = indexGanador;
-                    const primerTurnoId = sala.ordenJugadores[sala.turnoActual];
-                    const primerJugador = sala.users.get(primerTurnoId);
-                    
-                    console.log(`🎮 Nueva baza iniciada. Primer turno: ${primerJugador ? primerJugador.nombre : 'unknown'} (ganador de baza anterior)`);
-                    
-                    // Pequeño delay para que los jugadores vean el resultado antes de empezar
-                    setTimeout(() => {
-                        io.to(salaActual).emit("cambio_turno", primerTurnoId, primerJugador ? primerJugador.nombre : '');
-                        io.to(salaActual).emit("vaciar_mesa");
-                        
-                        // Si el primer jugador es un bot, hacer que juegue automáticamente
-                        if (primerJugador && primerJugador.esBot) {
-                            setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
-                        }
-                    }, 3000); // 3 segundos para que se vea el resultado y se pueda cantar
-                }
-            }
-            
-            // Verificar si terminó la MANO (5 bazas)
-            if (sala.bazasJugadasMano >= 5) {
-                // Calcular puntos de cartas según valores: 1=11, 3=10, 10=2, 11=3, 12=4
-                function puntosCarta(carta) {
-                    if (carta === 'DIEZ_MONTES_10') return 10;
-                    if (carta.startsWith('CANTO_')) {
-                        const partes = carta.split('_'); return parseInt(partes[2]) || 0;
-                    }
-                    const num = parseInt(carta.match(/\d+/)[0]);
-                    switch(num) {
-                        case 1: return 11;
-                        case 3: return 10;
-                        case 10: return 2;
-                        case 11: return 3;
-                        case 12: return 4;
-                        default: return 0;
-                    }
-                }
-                
-                const puntosA = sala.cartasGanadasEquipoA.reduce((sum, carta) => sum + puntosCarta(carta), 0);
-                const puntosB = sala.cartasGanadasEquipoB.reduce((sum, carta) => sum + puntosCarta(carta), 0);
-                
-                // Mesa limpia: un equipo gana las 5 bazas → +2 puntos extra de ronda
-                const bazasEquipoA = sala.cartasGanadasEquipoA.filter(c => !c.startsWith('CANTO_') && c !== 'DIEZ_MONTES_10').length > 0 ?
-                    (sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.A : 0) : 0;
-                const mesaLimpia = sala.bazasGanadasPorEquipo &&
-                    (sala.bazasGanadasPorEquipo.A === 5 || sala.bazasGanadasPorEquipo.B === 5);
-                const equipoMesaLimpia = mesaLimpia ?
-                    (sala.bazasGanadasPorEquipo.A === 5 ? 'A' : 'B') : null;
-                
-                // Determinar ganador de la RONDA (mano)
-                let ganadorRonda = null;
-                let puntosRondaGanados = 1;
-                const bazasA = sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.A : 0;
-                const bazasB = sala.bazasGanadasPorEquipo ? sala.bazasGanadasPorEquipo.B : 0;
-                
-                if (sala.cuatrolaActiva) {
-                    const tipoApuesta = sala.cuatrolaActiva.tipo; // 'solo', 'cuatrola', 'quintola'
-                    const equipoApuesta = sala.cuatrolaActiva.equipo;
-                    const equipoContrario = equipoApuesta === 'A' ? 'B' : 'A';
-                    const bazasEquipoApuesta = equipoApuesta === 'A' ? bazasA : bazasB;
-                    
-                    let ganoApuesta = false;
-                    if (tipoApuesta === 'solo') {
-                        // Solo: gana/pierde por puntos de cartas
-                        const puntosEquipoApuesta = equipoApuesta === 'A' ? puntosA : puntosB;
-                        const puntosContrario = equipoApuesta === 'A' ? puntosB : puntosA;
-                        ganoApuesta = puntosEquipoApuesta > puntosContrario;
-                        puntosRondaGanados = 2;
-                    } else if (tipoApuesta === 'cuatrola') {
-                        // Cuatrola: necesita ganar 4 o más bazas
-                        ganoApuesta = bazasEquipoApuesta >= 4;
-                        puntosRondaGanados = 4;
-                    } else if (tipoApuesta === 'quintola') {
-                        // Quintola: necesita ganar las 5 bazas
-                        ganoApuesta = bazasEquipoApuesta === 5;
-                        puntosRondaGanados = 5;
-                    }
-                    
-                    ganadorRonda = ganoApuesta ? equipoApuesta : equipoContrario;
-                } else if (puntosA > puntosB) {
-                    ganadorRonda = 'A';
-                } else if (puntosB > puntosA) {
-                    ganadorRonda = 'B';
-                } else {
-                    ganadorRonda = 'EMPATE';
-                }
-                
-                if (ganadorRonda !== 'EMPATE') {
-                    if (ganadorRonda === 'A') {
-                        // Mesa limpia da 2 puntos, no 3 (sobrescribe el punto normal)
-                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'A') {
-                            sala.puntosRondaEquipoA += 2;
-                        } else {
-                            sala.puntosRondaEquipoA += puntosRondaGanados;
-                        }
-                    } else {
-                        // Mesa limpia da 2 puntos, no 3 (sobrescribe el punto normal)
-                        if (!sala.cuatrolaActiva && mesaLimpia && equipoMesaLimpia === 'B') {
-                            sala.puntosRondaEquipoB += 2;
-                        } else {
-                            sala.puntosRondaEquipoB += puntosRondaGanados;
-                        }
-                    }
-                }
-                
-                // Notificar fin de ronda/mano
-                const jugadoresArray = Array.from(sala.users.entries());
-                io.to(salaActual).emit("fin_mano", {
-                    puntosCartasA: puntosA,
-                    puntosCartasB: puntosB,
-                    cartasA: sala.cartasGanadasEquipoA,
-                    cartasB: sala.cartasGanadasEquipoB,
-                    ganadorRonda: ganadorRonda,
-                    puntosRondaA: sala.puntosRondaEquipoA,
-                    puntosRondaB: sala.puntosRondaEquipoB,
-                    mesaLimpia: mesaLimpia ? equipoMesaLimpia : null,
-                    puntosRondaGanados: puntosRondaGanados
-                });
-                
-                io.to(salaActual).emit("actualizar_puntos", {
-                    puntosRondaA: sala.puntosRondaEquipoA,
-                    puntosRondaB: sala.puntosRondaEquipoB,
-                    bazasMano: 0,
-                    nombresEquipoA: jugadoresArray.filter((_,i) => i % 2 === 0).map(([_,d]) => d.nombre),
-                    nombresEquipoB: jugadoresArray.filter((_,i) => i % 2 === 1).map(([_,d]) => d.nombre)
-                });
-                
-                // Verificar si hay ganador de la PARTIDA (a 7 rondas)
-                if (sala.puntosRondaEquipoA >= 7) {
-                    sala.equipoGanador = 'A';
-                    io.to(salaActual).emit("partida_ganada", {
-                        equipo: 'A',
-                        puntosA: sala.puntosRondaEquipoA,
-                        puntosB: sala.puntosRondaEquipoB,
-                        mensaje: `¡Equipo A gana la partida! ${sala.puntosRondaEquipoA} - ${sala.puntosRondaEquipoB}`
-                    });
-                } else if (sala.puntosRondaEquipoB >= 7) {
-                    sala.equipoGanador = 'B';
-                    io.to(salaActual).emit("partida_ganada", {
-                        equipo: 'B',
-                        puntosA: sala.puntosRondaEquipoA,
-                        puntosB: sala.puntosRondaEquipoB,
-                        mensaje: `¡Equipo B gana la partida! ${sala.puntosRondaEquipoB} - ${sala.puntosRondaEquipoA}`
-                    });
-                } else {
-                    // Nueva mano - repartir cartas de nuevo
-                    console.log(`🔄 Iniciando nueva mano en 3 segundos... Puntos: A=${sala.puntosRondaEquipoA}, B=${sala.puntosRondaEquipoB}`);
-                    setTimeout(() => {
-                        console.log(`🔄 Ejecutando nuevaMano para ${sala.id}`);
-                        nuevaMano(sala);
-                    }, 3000);
-                }
-                
-                // El ganador de la última baza empieza la siguiente mano
-                if (sala.ganadorUltimaBaza) {
-                    const ganadorIndex = sala.ordenJugadores.indexOf(sala.ganadorUltimaBaza);
-                    if (ganadorIndex !== -1) {
-                        sala.turnoActual = ganadorIndex;
-                    }
-                }
-            } else {
-                // El ganador de la baza empieza la siguiente
-                const ganadorIndex = sala.ordenJugadores.indexOf(ganador_baza.jugador);
-                if (ganadorIndex !== -1) {
-                    sala.turnoActual = ganadorIndex;
-                    // Saltar compañero que no juega si es necesario
-                    while (sala.compañeroNoJuega && sala.ordenJugadores[sala.turnoActual] === sala.compañeroNoJuega) {
-                        sala.turnoActual = (sala.turnoActual + 1) % 4;
-                    }
-                    const nuevoTurno = sala.ordenJugadores[sala.turnoActual];
-                    const nuevoJugador = sala.users.get(nuevoTurno);
-                    io.to(salaActual).emit("cambio_turno", nuevoTurno, nuevoJugador ? nuevoJugador.nombre : '');
-                }
-            }
-        } else {
-            // Notificar a todos de quién es el siguiente turno
-            io.to(salaActual).emit("cambio_turno", siguienteTurnoId, siguienteJugador ? siguienteJugador.nombre : '');
         }
     });
     
@@ -1967,6 +1641,7 @@ io.on('connection', (socket) => {
                                 nombre: nombreJugador,
                                 mensaje: `${nombreJugador} ha abandonado el juego`
                             });
+                            eliminarBotsDeSala(salaAun);
                             if (salaAun.juegoIniciado && salaAun.users.size < 4) {
                                 salaAun.juegoIniciado = false;
                                 salaAun.cartasRonda = [];
@@ -2014,6 +1689,7 @@ io.on('connection', (socket) => {
                 });
                 
                 // Si el juego estaba iniciado y quedan menos de 4, terminar juego
+                eliminarBotsDeSala(sala);
                 if (sala.juegoIniciado && sala.users.size < 4) {
                     sala.juegoIniciado = false;
                     sala.cartasRonda = [];
