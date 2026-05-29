@@ -755,7 +755,7 @@ function procesarFinBaza(sala, salaId) {
     // Limpiar mesa
     sala.cartasRonda = [];
     sala.cartitasRonda = [];
-    
+
     // Si no terminó la mano, iniciar siguiente baza
     if (sala.bazasJugadasMano < 5) {
         const indexGanador = sala.ordenJugadores.indexOf(ganador_baza.jugador);
@@ -763,13 +763,21 @@ function procesarFinBaza(sala, salaId) {
             sala.turnoActual = indexGanador;
             const primerTurnoId = sala.ordenJugadores[sala.turnoActual];
             const primerJugador = sala.users.get(primerTurnoId);
-            
+
+            // Guardar el número de baza actual para detectar si alguien juega antes del timeout
+            const bazaAlIniciar = sala.bazasJugadasMano;
+
             console.log(`🎮 Nueva baza iniciada. Primer turno: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
-            
+
             setTimeout(() => {
+                // Si ya se jugó una carta en la nueva baza, no sobreescribir el turno ni limpiar la mesa
+                if (sala.cartasRonda.length > 0 || sala.bazasJugadasMano !== bazaAlIniciar) {
+                    console.log(`⚠️ Timeout baza ignorado: ya hay ${sala.cartasRonda.length} cartas en mesa o baza avanzó`);
+                    return;
+                }
                 io.to(salaId).emit("cambio_turno", primerTurnoId, primerJugador ? primerJugador.nombre : '');
                 io.to(salaId).emit("vaciar_mesa");
-                
+
                 if (primerJugador && primerJugador.esBot) {
                     setTimeout(() => botJugarCarta(sala, primerTurnoId), 2000);
                 }
