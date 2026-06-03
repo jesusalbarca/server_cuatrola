@@ -1168,6 +1168,7 @@ io.on('connection', (socket) => {
         sala.jugadoresPasaron = new Set();
         sala.cuatrolaActiva = null;
         sala.compañeroNoJuega = null;
+        sala.palosCantados = { A: [], B: [] };
         
         // Enviar info de equipos
         const equiposInfo = {};
@@ -1692,6 +1693,7 @@ io.on('connection', (socket) => {
             sala.cartasGanadasEquipoB = [];
             sala.bazasJugadasMano = 0;
             sala.ganadorUltimaBaza = null;
+            sala.palosCantados = { A: [], B: [] };
             console.log(`🔄 Sala ${salaActual} reseteada completamente`);
         }
 
@@ -1708,7 +1710,7 @@ io.on('connection', (socket) => {
                 const nombreJugador = jugadorDesconectado ? jugadorDesconectado.nombre : 'Jugador';
                 
                 // Grace period solo si el juego está en marcha con 4 jugadores (no en sala de espera)
-                if (sala.juegoActivo && sala.users.size === 4 && jugadorDesconectado) {
+                if (sala.juegoIniciado && sala.users.size === 4 && jugadorDesconectado) {
                     const key = `${nombreJugador}::${salaActual}`;
                     const timeoutId = setTimeout(() => {
                         // Grace period expirado: eliminar jugador definitivamente
@@ -1802,6 +1804,7 @@ io.on('connection', (socket) => {
                     sala.cartasGanadasEquipoB = [];
                     sala.bazasJugadasMano = 0;
                     sala.ganadorUltimaBaza = null;
+                    sala.palosCantados = { A: [], B: [] };
                 }
             }
         }
