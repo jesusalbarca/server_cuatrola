@@ -205,7 +205,7 @@ export async function ensureDefaultUsers() {
                 const idx = data2.users.findIndex(x => x.username === 'admin');
                 if (idx !== -1) {
                     data2.users[idx].stats.gamesWon = 20;
-                    data2.users[idx].activeSkin = 'mario';
+                    data2.users[idx].activeSkin = 'dark';
                     saveUsers(data2);
                 }
             }
@@ -223,7 +223,7 @@ export async function ensureDefaultUsers() {
 }
 
 // Umbrales de desbloqueo de skins (debe coincidir con SKINS en cartas.js)
-const SKIN_THRESHOLDS = { default: 0, mario: 3, pokemon: 7, jyb: 12, dark: 20 };
+const SKIN_THRESHOLDS = { default: 0, svg: 3, pokemon: 7, jyb: 12, dark: 20 };
 
 // Seleccionar skin activa
 export function selectSkin(userId, skinId) {
