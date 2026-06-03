@@ -204,13 +204,21 @@ export async function ensureDefaultUsers() {
                 const data2 = readUsers();
                 const idx = data2.users.findIndex(x => x.username === 'admin');
                 if (idx !== -1) {
-                    data2.users[idx].stats.gamesWon = 10;
+                    data2.users[idx].stats.gamesWon = 20;
                     data2.users[idx].activeSkin = 'mario';
                     saveUsers(data2);
                 }
             }
             console.log(`✅ Usuario por defecto creado: ${u.username}`);
         }
+    }
+    // Asegurar que admin tenga siempre 20 wins (por si ya existía con valor anterior)
+    const dataFinal = readUsers();
+    const adminIdx = dataFinal.users.findIndex(x => x.username === 'admin');
+    if (adminIdx !== -1 && dataFinal.users[adminIdx].stats.gamesWon < 20) {
+        dataFinal.users[adminIdx].stats.gamesWon = 20;
+        saveUsers(dataFinal);
+        console.log('✅ Admin actualizado a 20 victorias');
     }
 }
 
