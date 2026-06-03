@@ -1877,8 +1877,8 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // Perfil (requiere autenticación)
-app.get('/api/auth/profile', authMiddleware, (req, res) => {
-    const result = getUserById(req.userId);
+app.get('/api/auth/profile', authMiddleware, async (req, res) => {
+    const result = await getUserById(req.userId);
     if (result.success) {
         res.json(result);
     } else {
@@ -1887,10 +1887,10 @@ app.get('/api/auth/profile', authMiddleware, (req, res) => {
 });
 
 // Actualizar estadísticas (requiere autenticación)
-app.post('/api/stats/update', authMiddleware, (req, res) => {
+app.post('/api/stats/update', authMiddleware, async (req, res) => {
     const { gamesPlayed, gamesWon, handsWon, totalPoints, mesasLimpias, cantes } = req.body;
-    
-    const result = updateStats(req.userId, {
+
+    const result = await updateStats(req.userId, {
         gamesPlayed: gamesPlayed || 0,
         gamesWon: gamesWon || 0,
         handsWon: handsWon || 0,
@@ -1898,7 +1898,7 @@ app.post('/api/stats/update', authMiddleware, (req, res) => {
         mesasLimpias: mesasLimpias || 0,
         cantes: cantes || 0
     });
-    
+
     if (result.success) {
         res.json(result);
     } else {
@@ -1907,8 +1907,8 @@ app.post('/api/stats/update', authMiddleware, (req, res) => {
 });
 
 // Resetear estadísticas propias
-app.post('/api/stats/reset', authMiddleware, (req, res) => {
-    const result = resetStats(req.userId);
+app.post('/api/stats/reset', authMiddleware, async (req, res) => {
+    const result = await resetStats(req.userId);
     if (result.success) {
         res.json(result);
     } else {
@@ -1917,10 +1917,10 @@ app.post('/api/stats/reset', authMiddleware, (req, res) => {
 });
 
 // Seleccionar skin activa (requiere autenticación)
-app.post('/api/skins/select', authMiddleware, (req, res) => {
+app.post('/api/skins/select', authMiddleware, async (req, res) => {
     const { skinId } = req.body;
     if (!skinId) return res.status(400).json({ error: 'Falta skinId' });
-    const result = selectSkin(req.userId, skinId);
+    const result = await selectSkin(req.userId, skinId);
     if (result.success) {
         res.json(result);
     } else {
@@ -1929,9 +1929,9 @@ app.post('/api/skins/select', authMiddleware, (req, res) => {
 });
 
 // Ranking (público)
-app.get('/api/leaderboard', (req, res) => {
+app.get('/api/leaderboard', async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
-    const result = getLeaderboard(limit);
+    const result = await getLeaderboard(limit);
     res.json(result);
 });
 

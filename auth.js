@@ -1,292 +1,221 @@
-import fs from 'fs';
-import path from 'path';
+import { createClient } from '@supabase/supabase-js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
-const USERS_FILE = path.join(process.cwd(), 'users.json');
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'cuatrola-secret-key-change-in-production';
 const SALT_ROUNDS = 10;
 
-// Asegurar que el archivo de usuarios existe
-function ensureUsersFile() {
-    if (!fs.existsSync(USERS_FILE)) {
-        fs.writeFileSync(USERS_FILE, JSON.stringify({ users: [] }, null, 2));
-    }
-}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// Leer usuarios
-function readUsers() {
-    ensureUsersFile();
-    try {
-        const data = fs.readFileSync(USERS_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        console.error('Error leyendo usuarios:', error);
-        return { users: [] };
-    }
-}
-
-// Guardar usuarios
-function saveUsers(data) {
-    try {
-        fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
-        return true;
-    } catch (error) {
-        console.error('Error guardando usuarios:', error);
-        return false;
-    }
-}
-
-// Generar token JWT
 function generateToken(userId) {
     return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
 }
 
-// Verificar token
 export function verifyToken(token) {
     try {
         return jwt.verify(token, JWT_SECRET);
-    } catch (error) {
+    } catch {
         return null;
     }
 }
 
-// Registrar usuario
+function mapUser(u) {
+    return {
+        id: u.id,
+        username: u.username,
+        email: u.email,
+        createdAt: u.created_at,
+        activeSkin: u.active_skin,
+        stats: {
+            gamesPlayed: u.games_played,
+            gamesWon: u.games_won,
+            handsWon: u.hands_won,
+            totalPoints: u.total_points,
+            mesasLimpias: u.mesas_limpias,
+            cantes: u.cantes,
+            lastPlayed: u.last_played
+        }
+    };
+}
+
 export async function register(username, email, password) {
-    const data = readUsers();
-    
-    // Verificar si ya existe
-    if (data.users.find(u => u.username === username || u.email === email)) {
+    const { data: existing } = await supabase
+        .from('users')
+        .select('id')
+        .or(`username.eq.${username},email.eq.${email}`)
+        .limit(1);
+
+    if (existing && existing.length > 0) {
         return { success: false, error: 'Usuario o email ya existe' };
     }
-    
-    // Hashear contraseña
-    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-    
-    // Crear usuario
-    const user = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-        username,
-        email,
-        password: hashedPassword,
-        createdAt: new Date().toISOString(),
-        activeSkin: 'default',
-        stats: {
-            gamesPlayed: 0,
-            gamesWon: 0,
-            handsWon: 0,
-            totalPoints: 0,
-            mesasLimpias: 0,
-            cantes: 0
-        }
-    };
-    
-    data.users.push(user);
-    
-    if (!saveUsers(data)) {
-        return { success: false, error: 'Error guardando usuario' };
-    }
-    
+
+    const password_hash = await bcrypt.hash(password, SALT_ROUNDS);
+
+    const { data: user, error } = await supabase
+        .from('users')
+        .insert({ username, email, password_hash })
+        .select()
+        .single();
+
+    if (error) return { success: false, error: 'Error guardando usuario' };
+
     const token = generateToken(user.id);
-    const { password: _, ...userWithoutPassword } = user;
-    
-    return { success: true, user: userWithoutPassword, token };
+    return { success: true, user: mapUser(user), token };
 }
 
-// Login
 export async function login(usernameOrEmail, password) {
-    const data = readUsers();
-    
-    const user = data.users.find(u => 
-        u.username === usernameOrEmail || u.email === usernameOrEmail
-    );
-    
-    if (!user) {
-        return { success: false, error: 'Usuario no encontrado' };
-    }
-    
-    const validPassword = await bcrypt.compare(password, user.password);
-    
-    if (!validPassword) {
-        return { success: false, error: 'Contraseña incorrecta' };
-    }
-    
-    const token = generateToken(user.id);
-    const { password: _, ...userWithoutPassword } = user;
-    
-    return { success: true, user: userWithoutPassword, token };
-}
+    const { data: user } = await supabase
+        .from('users')
+        .select('*')
+        .or(`username.eq.${usernameOrEmail},email.eq.${usernameOrEmail}`)
+        .limit(1)
+        .maybeSingle();
 
-// Obtener perfil por token
-export function getProfile(token) {
-    const decoded = verifyToken(token);
-    if (!decoded) {
-        return { success: false, error: 'Token inválido' };
-    }
-    
-    const data = readUsers();
-    const user = data.users.find(u => u.id === decoded.userId);
-    
-    if (!user) {
-        return { success: false, error: 'Usuario no encontrado' };
-    }
-    
-    const { password: _, ...userWithoutPassword } = user;
-    return { success: true, user: userWithoutPassword };
-}
-
-// Actualizar estadísticas
-export function updateStats(userId, stats) {
-    const data = readUsers();
-    const userIndex = data.users.findIndex(u => u.id === userId);
-    
-    if (userIndex === -1) {
-        return { success: false, error: 'Usuario no encontrado' };
-    }
-    
-    const user = data.users[userIndex];
-    
-    // Actualizar stats
-    user.stats.gamesPlayed += stats.gamesPlayed || 0;
-    user.stats.gamesWon += stats.gamesWon || 0;
-    user.stats.handsWon += stats.handsWon || 0;
-    user.stats.totalPoints += stats.totalPoints || 0;
-    user.stats.mesasLimpias += stats.mesasLimpias || 0;
-    user.stats.cantes += stats.cantes || 0;
-    user.stats.lastPlayed = new Date().toISOString();
-    
-    if (!saveUsers(data)) {
-        return { success: false, error: 'Error guardando estadísticas' };
-    }
-    
-    return { success: true };
-}
-
-// Resetear estadísticas a cero
-export function resetStats(userId) {
-    const data = readUsers();
-    const userIndex = data.users.findIndex(u => u.id === userId);
-
-    if (userIndex === -1) {
-        return { success: false, error: 'Usuario no encontrado' };
-    }
-
-    data.users[userIndex].stats = {
-        gamesPlayed: 0,
-        gamesWon: 0,
-        handsWon: 0,
-        totalPoints: 0,
-        mesasLimpias: 0,
-        cantes: 0
-    };
-
-    if (!saveUsers(data)) {
-        return { success: false, error: 'Error guardando estadísticas' };
-    }
-
-    return { success: true };
-}
-
-// Crear usuarios de prueba por defecto si no existen (se llama al arrancar el servidor)
-export async function ensureDefaultUsers() {
-    const defaults = [
-        { username: 'a',     email: 'a@a.a',                password: '111111'   },
-        { username: 'b',     email: 'b@b.b',                password: '111111'   },
-        { username: 'c',     email: 'c@c.c',                password: '111111'   },
-        { username: 'd',     email: 'd@d.d',                password: '111111'   },
-        { username: 'admin', email: 'admin@cuatrola.com',   password: 'admin123' },
-    ];
-    for (const u of defaults) {
-        const data = readUsers();
-        if (!data.users.find(x => x.username === u.username)) {
-            const result = await register(u.username, u.email, u.password);
-            if (result.success && u.username === 'admin') {
-                const data2 = readUsers();
-                const idx = data2.users.findIndex(x => x.username === 'admin');
-                if (idx !== -1) {
-                    data2.users[idx].stats.gamesWon = 20;
-                    data2.users[idx].activeSkin = 'dark';
-                    saveUsers(data2);
-                }
-            }
-            console.log(`✅ Usuario por defecto creado: ${u.username}`);
-        }
-    }
-    // Asegurar que admin tenga siempre 20 wins (por si ya existía con valor anterior)
-    const dataFinal = readUsers();
-    const adminIdx = dataFinal.users.findIndex(x => x.username === 'admin');
-    if (adminIdx !== -1 && dataFinal.users[adminIdx].stats.gamesWon < 20) {
-        dataFinal.users[adminIdx].stats.gamesWon = 20;
-        saveUsers(dataFinal);
-        console.log('✅ Admin actualizado a 20 victorias');
-    }
-}
-
-// Umbrales de desbloqueo de skins (debe coincidir con SKINS en cartas.js)
-const SKIN_THRESHOLDS = { default: 0, svg: 3, pokemon: 7, jyb: 12, dark: 20 };
-
-// Seleccionar skin activa
-export function selectSkin(userId, skinId) {
-    if (!SKIN_THRESHOLDS.hasOwnProperty(skinId)) {
-        return { success: false, error: 'Skin no válida' };
-    }
-    const data = readUsers();
-    const userIndex = data.users.findIndex(u => u.id === userId);
-    if (userIndex === -1) return { success: false, error: 'Usuario no encontrado' };
-
-    const gamesWon = data.users[userIndex].stats?.gamesWon || 0;
-    if (gamesWon < SKIN_THRESHOLDS[skinId]) {
-        return { success: false, error: `Necesitas ${SKIN_THRESHOLDS[skinId]} victorias para esta skin` };
-    }
-
-    data.users[userIndex].activeSkin = skinId;
-    if (!saveUsers(data)) return { success: false, error: 'Error guardando skin' };
-    return { success: true };
-}
-
-// Obtener usuario por ID (sin contraseña)
-export function getUserById(userId) {
-    const data = readUsers();
-    const user = data.users.find(u => u.id === userId);
     if (!user) return { success: false, error: 'Usuario no encontrado' };
-    const { password: _, ...userWithoutPassword } = user;
-    return { success: true, user: userWithoutPassword };
+
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) return { success: false, error: 'Contraseña incorrecta' };
+
+    const token = generateToken(user.id);
+    return { success: true, user: mapUser(user), token };
 }
 
-// Obtener ranking (top jugadores)
-export function getLeaderboard(limit = 20) {
-    const data = readUsers();
-    
-    const leaderboard = data.users
-        .map(u => ({
-            id: u.id,
-            username: u.username,
-            gamesPlayed: u.stats.gamesPlayed,
-            gamesWon: u.stats.gamesWon,
-            handsWon: u.stats.handsWon,
-            totalPoints: u.stats.totalPoints,
-            mesasLimpias: u.stats.mesasLimpias,
-            winRate: u.stats.gamesPlayed > 0 ? Math.round((u.stats.gamesWon / u.stats.gamesPlayed) * 100) : 0
-        }))
-        .sort((a, b) => b.gamesWon - a.gamesWon || b.winRate - a.winRate)
-        .slice(0, limit);
-    
+export async function getUserById(userId) {
+    const { data: user } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+
+    if (!user) return { success: false, error: 'Usuario no encontrado' };
+    return { success: true, user: mapUser(user) };
+}
+
+export async function updateStats(userId, stats) {
+    const { data: user } = await supabase
+        .from('users')
+        .select('games_played, games_won, hands_won, total_points, mesas_limpias, cantes')
+        .eq('id', userId)
+        .maybeSingle();
+
+    if (!user) return { success: false, error: 'Usuario no encontrado' };
+
+    const { error } = await supabase
+        .from('users')
+        .update({
+            games_played:  user.games_played  + (stats.gamesPlayed  || 0),
+            games_won:     user.games_won     + (stats.gamesWon     || 0),
+            hands_won:     user.hands_won     + (stats.handsWon     || 0),
+            total_points:  user.total_points  + (stats.totalPoints  || 0),
+            mesas_limpias: user.mesas_limpias + (stats.mesasLimpias || 0),
+            cantes:        user.cantes        + (stats.cantes       || 0),
+            last_played:   new Date().toISOString()
+        })
+        .eq('id', userId);
+
+    if (error) return { success: false, error: 'Error guardando estadísticas' };
+    return { success: true };
+}
+
+export async function resetStats(userId) {
+    const { error } = await supabase
+        .from('users')
+        .update({
+            games_played: 0, games_won: 0, hands_won: 0,
+            total_points: 0, mesas_limpias: 0, cantes: 0, last_played: null
+        })
+        .eq('id', userId);
+
+    if (error) return { success: false, error: 'Error guardando estadísticas' };
+    return { success: true };
+}
+
+export async function getLeaderboard(limit = 20) {
+    const { data: users } = await supabase
+        .from('users')
+        .select('id, username, games_played, games_won, hands_won, total_points, mesas_limpias')
+        .order('games_won', { ascending: false })
+        .limit(limit);
+
+    const leaderboard = (users || []).map(u => ({
+        id: u.id,
+        username: u.username,
+        gamesPlayed: u.games_played,
+        gamesWon: u.games_won,
+        handsWon: u.hands_won,
+        totalPoints: u.total_points,
+        mesasLimpias: u.mesas_limpias,
+        winRate: u.games_played > 0 ? Math.round((u.games_won / u.games_played) * 100) : 0
+    }));
+
     return { success: true, leaderboard };
 }
 
-// Middleware para verificar token
+const SKIN_THRESHOLDS = { default: 0, svg: 3, pokemon: 7, jyb: 12, dark: 20 };
+
+export async function selectSkin(userId, skinId) {
+    if (!Object.prototype.hasOwnProperty.call(SKIN_THRESHOLDS, skinId)) {
+        return { success: false, error: 'Skin no válida' };
+    }
+
+    const { data: user } = await supabase
+        .from('users')
+        .select('games_won')
+        .eq('id', userId)
+        .maybeSingle();
+
+    if (!user) return { success: false, error: 'Usuario no encontrado' };
+
+    if (user.games_won < SKIN_THRESHOLDS[skinId]) {
+        return { success: false, error: `Necesitas ${SKIN_THRESHOLDS[skinId]} victorias para esta skin` };
+    }
+
+    const { error } = await supabase
+        .from('users')
+        .update({ active_skin: skinId })
+        .eq('id', userId);
+
+    if (error) return { success: false, error: 'Error guardando skin' };
+    return { success: true };
+}
+
+export async function ensureDefaultUsers() {
+    const defaults = [
+        { username: 'a',     email: 'a@a.a',              password: '111111',   extra: null },
+        { username: 'b',     email: 'b@b.b',              password: '111111',   extra: null },
+        { username: 'c',     email: 'c@c.c',              password: '111111',   extra: null },
+        { username: 'd',     email: 'd@d.d',              password: '111111',   extra: null },
+        { username: 'admin', email: 'admin@cuatrola.com', password: 'admin123', extra: { games_won: 20, active_skin: 'dark' } },
+    ];
+
+    for (const u of defaults) {
+        const { data: existing } = await supabase
+            .from('users')
+            .select('id, games_won')
+            .eq('username', u.username)
+            .maybeSingle();
+
+        if (!existing) {
+            const password_hash = await bcrypt.hash(u.password, SALT_ROUNDS);
+            const row = { username: u.username, email: u.email, password_hash, ...u.extra };
+            await supabase.from('users').insert(row);
+            console.log(`✅ Usuario por defecto creado: ${u.username}`);
+        } else if (u.username === 'admin' && existing.games_won < 20) {
+            await supabase.from('users').update({ games_won: 20 }).eq('id', existing.id);
+            console.log('✅ Admin actualizado a 20 victorias');
+        }
+    }
+}
+
 export function authMiddleware(req, res, next) {
     const token = req.headers.authorization?.split(' ')[1];
-    
-    if (!token) {
-        return res.status(401).json({ error: 'Token requerido' });
-    }
-    
+    if (!token) return res.status(401).json({ error: 'Token requerido' });
+
     const decoded = verifyToken(token);
-    if (!decoded) {
-        return res.status(401).json({ error: 'Token inválido' });
-    }
-    
+    if (!decoded) return res.status(401).json({ error: 'Token inválido' });
+
     req.userId = decoded.userId;
     next();
 }
