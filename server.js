@@ -2,7 +2,7 @@ import express from "express";
 import { Server as SocketServer } from "socket.io";
 import http from 'http'
 import cors from 'cors'
-import { register, login, getProfile, updateStats, resetStats, getLeaderboard, authMiddleware, ensureDefaultUsers } from './auth.js';
+import { register, login, getUserById, verifyToken, updateStats, resetStats, getLeaderboard, selectSkin, authMiddleware, ensureDefaultUsers } from './auth.js';
 
 const PORT = process.env.PORT || 4000
 
@@ -901,7 +901,8 @@ function procesarFinMano(sala, salaId) {
         puntosRondaA: sala.puntosRondaEquipoA,
         puntosRondaB: sala.puntosRondaEquipoB,
         mesaLimpia: mesaLimpia ? equipoMesaLimpia : null,
-        puntosRondaGanados: puntosRondaGanados
+        puntosRondaGanados: puntosRondaGanados,
+        bazasPorEquipo: sala.bazasGanadasPorEquipo || { A: 0, B: 0 }
     });
     
     io.to(salaId).emit("actualizar_puntos", {
@@ -919,6 +920,9 @@ function procesarFinMano(sala, salaId) {
             equipo: 'A',
             puntosA: sala.puntosRondaEquipoA,
             puntosB: sala.puntosRondaEquipoB,
+            mesaLimpia: mesaLimpia ? equipoMesaLimpia : null,
+            cantesA: sala.cantesTotales ? sala.cantesTotales.A : 0,
+            cantesB: sala.cantesTotales ? sala.cantesTotales.B : 0,
             mensaje: `¡Equipo A gana la partida! ${sala.puntosRondaEquipoA} - ${sala.puntosRondaEquipoB}`
         });
         sala.juegoIniciado = false;
@@ -929,6 +933,9 @@ function procesarFinMano(sala, salaId) {
             equipo: 'B',
             puntosA: sala.puntosRondaEquipoA,
             puntosB: sala.puntosRondaEquipoB,
+            mesaLimpia: mesaLimpia ? equipoMesaLimpia : null,
+            cantesA: sala.cantesTotales ? sala.cantesTotales.A : 0,
+            cantesB: sala.cantesTotales ? sala.cantesTotales.B : 0,
             mensaje: `¡Equipo B gana la partida! ${sala.puntosRondaEquipoB} - ${sala.puntosRondaEquipoA}`
         });
         sala.juegoIniciado = false;
@@ -1169,6 +1176,7 @@ io.on('connection', (socket) => {
         sala.cuatrolaActiva = null;
         sala.compañeroNoJuega = null;
         sala.palosCantados = { A: [], B: [] };
+        sala.cantesTotales = { A: 0, B: 0 };
         
         // Enviar info de equipos
         const equiposInfo = {};
@@ -1302,6 +1310,8 @@ io.on('connection', (socket) => {
         
         // Registrar palo como cantado
         sala.palosCantados[equipo].push(palo);
+        if (!sala.cantesTotales) sala.cantesTotales = { A: 0, B: 0 };
+        sala.cantesTotales[equipo]++;
         
         // Sumar puntos al equipo
         if (equipo === 'A') {
@@ -1826,8 +1836,9 @@ app.post('/api/auth/register', async (req, res) => {
     }
     
     const result = await register(username, email, password);
-    
+
     if (result.success) {
+        activeSessions.set(result.user.id, result.token);
         res.json(result);
     } else {
         res.status(400).json(result);
@@ -1846,7 +1857,11 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (result.success) {
         if (activeSessions.has(result.user.id)) {
-            return res.status(409).json({ success: false, error: 'Ya existe una sesión activa para este usuario. Cierra la sesión anterior antes de iniciar una nueva.' });
+            const storedToken = activeSessions.get(result.user.id);
+            if (verifyToken(storedToken)) {
+                return res.status(409).json({ success: false, error: 'Ya existe una sesión activa para este usuario. Cierra la sesión anterior antes de iniciar una nueva.' });
+            }
+            activeSessions.delete(result.user.id);
         }
         activeSessions.set(result.user.id, result.token);
         res.json(result);
@@ -1863,9 +1878,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 
 // Perfil (requiere autenticación)
 app.get('/api/auth/profile', authMiddleware, (req, res) => {
-    const token = req.headers.authorization.split(' ')[1];
-    const result = getProfile(token);
-    
+    const result = getUserById(req.userId);
     if (result.success) {
         res.json(result);
     } else {
@@ -1896,6 +1909,18 @@ app.post('/api/stats/update', authMiddleware, (req, res) => {
 // Resetear estadísticas propias
 app.post('/api/stats/reset', authMiddleware, (req, res) => {
     const result = resetStats(req.userId);
+    if (result.success) {
+        res.json(result);
+    } else {
+        res.status(400).json(result);
+    }
+});
+
+// Seleccionar skin activa (requiere autenticación)
+app.post('/api/skins/select', authMiddleware, (req, res) => {
+    const { skinId } = req.body;
+    if (!skinId) return res.status(400).json({ error: 'Falta skinId' });
+    const result = selectSkin(req.userId, skinId);
     if (result.success) {
         res.json(result);
     } else {

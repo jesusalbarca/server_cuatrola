@@ -43,7 +43,7 @@ function generateToken(userId) {
 }
 
 // Verificar token
-function verifyToken(token) {
+export function verifyToken(token) {
     try {
         return jwt.verify(token, JWT_SECRET);
     } catch (error) {
@@ -70,6 +70,7 @@ export async function register(username, email, password) {
         email,
         password: hashedPassword,
         createdAt: new Date().toISOString(),
+        activeSkin: 'default',
         stats: {
             gamesPlayed: 0,
             gamesWon: 0,
@@ -189,18 +190,59 @@ export function resetStats(userId) {
 // Crear usuarios de prueba por defecto si no existen (se llama al arrancar el servidor)
 export async function ensureDefaultUsers() {
     const defaults = [
-        { username: 'a', email: 'a@a.a', password: '111111' },
-        { username: 'b', email: 'b@b.b', password: '111111' },
-        { username: 'c', email: 'c@c.c', password: '111111' },
-        { username: 'd', email: 'd@d.d', password: '111111' },
+        { username: 'a',     email: 'a@a.a',                password: '111111'   },
+        { username: 'b',     email: 'b@b.b',                password: '111111'   },
+        { username: 'c',     email: 'c@c.c',                password: '111111'   },
+        { username: 'd',     email: 'd@d.d',                password: '111111'   },
+        { username: 'admin', email: 'admin@cuatrola.com',   password: 'admin123' },
     ];
     for (const u of defaults) {
         const data = readUsers();
         if (!data.users.find(x => x.username === u.username)) {
-            await register(u.username, u.email, u.password);
+            const result = await register(u.username, u.email, u.password);
+            if (result.success && u.username === 'admin') {
+                const data2 = readUsers();
+                const idx = data2.users.findIndex(x => x.username === 'admin');
+                if (idx !== -1) {
+                    data2.users[idx].stats.gamesWon = 10;
+                    data2.users[idx].activeSkin = 'mario';
+                    saveUsers(data2);
+                }
+            }
             console.log(`✅ Usuario por defecto creado: ${u.username}`);
         }
     }
+}
+
+// Umbrales de desbloqueo de skins (debe coincidir con SKINS en cartas.js)
+const SKIN_THRESHOLDS = { default: 0, mario: 3, pokemon: 7, jyb: 12, dark: 20 };
+
+// Seleccionar skin activa
+export function selectSkin(userId, skinId) {
+    if (!SKIN_THRESHOLDS.hasOwnProperty(skinId)) {
+        return { success: false, error: 'Skin no válida' };
+    }
+    const data = readUsers();
+    const userIndex = data.users.findIndex(u => u.id === userId);
+    if (userIndex === -1) return { success: false, error: 'Usuario no encontrado' };
+
+    const gamesWon = data.users[userIndex].stats?.gamesWon || 0;
+    if (gamesWon < SKIN_THRESHOLDS[skinId]) {
+        return { success: false, error: `Necesitas ${SKIN_THRESHOLDS[skinId]} victorias para esta skin` };
+    }
+
+    data.users[userIndex].activeSkin = skinId;
+    if (!saveUsers(data)) return { success: false, error: 'Error guardando skin' };
+    return { success: true };
+}
+
+// Obtener usuario por ID (sin contraseña)
+export function getUserById(userId) {
+    const data = readUsers();
+    const user = data.users.find(u => u.id === userId);
+    if (!user) return { success: false, error: 'Usuario no encontrado' };
+    const { password: _, ...userWithoutPassword } = user;
+    return { success: true, user: userWithoutPassword };
 }
 
 // Obtener ranking (top jugadores)
