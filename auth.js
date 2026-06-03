@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
@@ -7,7 +8,9 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'cuatrola-secret-key-change-in-production';
 const SALT_ROUNDS = 10;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    realtime: { transport: WebSocket }
+});
 
 function generateToken(userId) {
     return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
