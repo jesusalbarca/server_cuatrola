@@ -24,7 +24,7 @@ export function verifyToken(token) {
     }
 }
 
-function mapUser(u) {
+function mapUser(u, s = {}) {
     return {
         id: u.id,
         username: u.username,
@@ -32,13 +32,13 @@ function mapUser(u) {
         createdAt: u.created_at,
         activeSkin: u.active_skin,
         stats: {
-            gamesPlayed: u.games_played,
-            gamesWon: u.games_won,
-            handsWon: u.hands_won,
-            totalPoints: u.total_points,
-            mesasLimpias: u.mesas_limpias,
-            cantes: u.cantes,
-            lastPlayed: u.last_played
+            gamesPlayed:  s.games_played  ?? 0,
+            gamesWon:     s.games_won     ?? 0,
+            handsWon:     s.hands_won     ?? 0,
+            totalPoints:  s.total_points  ?? 0,
+            mesasLimpias: s.mesas_limpias ?? 0,
+            cantes:       s.cantes        ?? 0,
+            lastPlayed:   s.last_played   ?? null
         }
     };
 }
@@ -64,6 +64,9 @@ export async function register(username, email, password) {
 
     if (error) return { success: false, error: 'Error guardando usuario' };
 
+    // Crear fila de stats vacía
+    await supabase.from('user_stats').insert({ user_id: user.id });
+
     const token = generateToken(user.id);
     return { success: true, user: mapUser(user), token };
 }
@@ -81,8 +84,14 @@ export async function login(usernameOrEmail, password) {
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) return { success: false, error: 'Contraseña incorrecta' };
 
+    const { data: stats } = await supabase
+        .from('user_stats')
+        .select('*')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
     const token = generateToken(user.id);
-    return { success: true, user: mapUser(user), token };
+    return { success: true, user: mapUser(user, stats || {}), token };
 }
 
 export async function getUserById(userId) {
@@ -93,30 +102,37 @@ export async function getUserById(userId) {
         .maybeSingle();
 
     if (!user) return { success: false, error: 'Usuario no encontrado' };
-    return { success: true, user: mapUser(user) };
+
+    const { data: stats } = await supabase
+        .from('user_stats')
+        .select('*')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    return { success: true, user: mapUser(user, stats || {}) };
 }
 
 export async function updateStats(userId, stats) {
-    const { data: user } = await supabase
-        .from('users')
-        .select('games_played, games_won, hands_won, total_points, mesas_limpias, cantes')
-        .eq('id', userId)
+    const { data: current } = await supabase
+        .from('user_stats')
+        .select('*')
+        .eq('user_id', userId)
         .maybeSingle();
 
-    if (!user) return { success: false, error: 'Usuario no encontrado' };
+    if (!current) return { success: false, error: 'Usuario no encontrado' };
 
     const { error } = await supabase
-        .from('users')
+        .from('user_stats')
         .update({
-            games_played:  user.games_played  + (stats.gamesPlayed  || 0),
-            games_won:     user.games_won     + (stats.gamesWon     || 0),
-            hands_won:     user.hands_won     + (stats.handsWon     || 0),
-            total_points:  user.total_points  + (stats.totalPoints  || 0),
-            mesas_limpias: user.mesas_limpias + (stats.mesasLimpias || 0),
-            cantes:        user.cantes        + (stats.cantes       || 0),
+            games_played:  current.games_played  + (stats.gamesPlayed  || 0),
+            games_won:     current.games_won     + (stats.gamesWon     || 0),
+            hands_won:     current.hands_won     + (stats.handsWon     || 0),
+            total_points:  current.total_points  + (stats.totalPoints  || 0),
+            mesas_limpias: current.mesas_limpias + (stats.mesasLimpias || 0),
+            cantes:        current.cantes        + (stats.cantes       || 0),
             last_played:   new Date().toISOString()
         })
-        .eq('id', userId);
+        .eq('user_id', userId);
 
     if (error) return { success: false, error: 'Error guardando estadísticas' };
     return { success: true };
@@ -124,33 +140,33 @@ export async function updateStats(userId, stats) {
 
 export async function resetStats(userId) {
     const { error } = await supabase
-        .from('users')
+        .from('user_stats')
         .update({
             games_played: 0, games_won: 0, hands_won: 0,
             total_points: 0, mesas_limpias: 0, cantes: 0, last_played: null
         })
-        .eq('id', userId);
+        .eq('user_id', userId);
 
-    if (error) return { success: false, error: 'Error guardando estadísticas' };
+    if (error) return { success: false, error: 'Error reseteando estadísticas' };
     return { success: true };
 }
 
 export async function getLeaderboard(limit = 20) {
-    const { data: users } = await supabase
-        .from('users')
-        .select('id, username, games_played, games_won, hands_won, total_points, mesas_limpias')
+    const { data } = await supabase
+        .from('user_stats')
+        .select('user_id, games_played, games_won, hands_won, total_points, mesas_limpias, users(username)')
         .order('games_won', { ascending: false })
         .limit(limit);
 
-    const leaderboard = (users || []).map(u => ({
-        id: u.id,
-        username: u.username,
-        gamesPlayed: u.games_played,
-        gamesWon: u.games_won,
-        handsWon: u.hands_won,
-        totalPoints: u.total_points,
-        mesasLimpias: u.mesas_limpias,
-        winRate: u.games_played > 0 ? Math.round((u.games_won / u.games_played) * 100) : 0
+    const leaderboard = (data || []).map(s => ({
+        id: s.user_id,
+        username: s.users?.username ?? '?',
+        gamesPlayed:  s.games_played,
+        gamesWon:     s.games_won,
+        handsWon:     s.hands_won,
+        totalPoints:  s.total_points,
+        mesasLimpias: s.mesas_limpias,
+        winRate: s.games_played > 0 ? Math.round((s.games_won / s.games_played) * 100) : 0
     }));
 
     return { success: true, leaderboard };
@@ -163,15 +179,15 @@ export async function selectSkin(userId, skinId) {
         return { success: false, error: 'Skin no válida' };
     }
 
-    const { data: user } = await supabase
-        .from('users')
+    const { data: stats } = await supabase
+        .from('user_stats')
         .select('games_won')
-        .eq('id', userId)
+        .eq('user_id', userId)
         .maybeSingle();
 
-    if (!user) return { success: false, error: 'Usuario no encontrado' };
+    if (!stats) return { success: false, error: 'Usuario no encontrado' };
 
-    if (user.games_won < SKIN_THRESHOLDS[skinId]) {
+    if (stats.games_won < SKIN_THRESHOLDS[skinId]) {
         return { success: false, error: `Necesitas ${SKIN_THRESHOLDS[skinId]} victorias para esta skin` };
     }
 
@@ -190,24 +206,36 @@ export async function ensureDefaultUsers() {
         { username: 'b',     email: 'b@b.b',              password: '111111',   extra: null },
         { username: 'c',     email: 'c@c.c',              password: '111111',   extra: null },
         { username: 'd',     email: 'd@d.d',              password: '111111',   extra: null },
-        { username: 'admin', email: 'admin@cuatrola.com', password: 'admin123', extra: { games_won: 20, active_skin: 'dark' } },
+        { username: 'admin', email: 'admin@cuatrola.com', password: 'admin123', extra: { active_skin: 'dark' } },
     ];
 
     for (const u of defaults) {
         const { data: existing } = await supabase
             .from('users')
-            .select('id, games_won')
+            .select('id')
             .eq('username', u.username)
             .maybeSingle();
 
         if (!existing) {
             const password_hash = await bcrypt.hash(u.password, SALT_ROUNDS);
-            const row = { username: u.username, email: u.email, password_hash, ...u.extra };
-            await supabase.from('users').insert(row);
+            const row = { username: u.username, email: u.email, password_hash, ...(u.extra || {}) };
+            const { data: newUser } = await supabase.from('users').insert(row).select().single();
+            if (newUser) {
+                const statsRow = { user_id: newUser.id };
+                if (u.username === 'admin') statsRow.games_won = 20;
+                await supabase.from('user_stats').insert(statsRow);
+            }
             console.log(`✅ Usuario por defecto creado: ${u.username}`);
-        } else if (u.username === 'admin' && existing.games_won < 20) {
-            await supabase.from('users').update({ games_won: 20 }).eq('id', existing.id);
-            console.log('✅ Admin actualizado a 20 victorias');
+        } else if (u.username === 'admin') {
+            const { data: adminStats } = await supabase
+                .from('user_stats')
+                .select('games_won')
+                .eq('user_id', existing.id)
+                .maybeSingle();
+            if (adminStats && adminStats.games_won < 20) {
+                await supabase.from('user_stats').update({ games_won: 20 }).eq('user_id', existing.id);
+                console.log('✅ Admin actualizado a 20 victorias');
+            }
         }
     }
 }
