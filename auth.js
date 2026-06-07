@@ -64,9 +64,6 @@ export async function register(username, email, password) {
 
     if (error) return { success: false, error: 'Error guardando usuario' };
 
-    // Crear fila de stats vacía
-    await supabase.from('user_stats').insert({ user_id: user.id });
-
     const token = generateToken(user.id);
     return { success: true, user: mapUser(user), token };
 }
@@ -221,21 +218,11 @@ export async function ensureDefaultUsers() {
             const row = { username: u.username, email: u.email, password_hash, ...(u.extra || {}) };
             const { data: newUser } = await supabase.from('users').insert(row).select().single();
             if (newUser) {
-                const statsRow = { user_id: newUser.id };
-                if (u.username === 'admin') statsRow.games_won = 20;
-                await supabase.from('user_stats').insert(statsRow);
+                await supabase.from('user_stats')
+                    .update({ games_played: 30, games_won: 30 })
+                    .eq('user_id', newUser.id);
             }
             console.log(`✅ Usuario por defecto creado: ${u.username}`);
-        } else if (u.username === 'admin') {
-            const { data: adminStats } = await supabase
-                .from('user_stats')
-                .select('games_won')
-                .eq('user_id', existing.id)
-                .maybeSingle();
-            if (adminStats && adminStats.games_won < 20) {
-                await supabase.from('user_stats').update({ games_won: 20 }).eq('user_id', existing.id);
-                console.log('✅ Admin actualizado a 20 victorias');
-            }
         }
     }
 }
