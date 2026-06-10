@@ -418,6 +418,8 @@ function nuevaMano(sala) {
     sala.faseApuestas = true;
     sala.apuestas = [];
     sala.apuestaActual = null;
+    sala.historialApuestas = [];
+    sala.turnoApuesta = null;
     sala.jugadoresPasaron.clear();
     sala.cuatrolaActiva = null;
     sala.compañeroNoJuega = null;
@@ -463,6 +465,8 @@ function nuevaMano(sala) {
     
     // Jugador que tiene el fallo (quien baraja = manoIndex)
     const jugadorFalloNuevaMano = sala.users.get(sala.ordenJugadores[sala.manoIndex]);
+    sala.jugadorFalloNombre = jugadorFalloNuevaMano ? jugadorFalloNuevaMano.nombre : '';
+    sala.turnoApuesta = primerTurno;
     
     io.to(sala.id).emit('fase_apuestas', {
         jugadores: jugadoresInfo,
@@ -1240,6 +1244,8 @@ io.on('connection', (socket) => {
         sala.faseApuestas = true;
         sala.apuestas = [];
         sala.apuestaActual = null;
+        sala.historialApuestas = [];
+        sala.turnoApuesta = null;
         sala.jugadoresPasaron = new Set();
         sala.cuatrolaActiva = null;
         sala.compañeroNoJuega = null;
@@ -1272,6 +1278,8 @@ io.on('connection', (socket) => {
         
         // Jugador que tiene el fallo (quien baraja = manoIndex)
         const jugadorFalloInicio = sala.users.get(sala.ordenJugadores[sala.manoIndex]);
+        sala.jugadorFalloNombre = jugadorFalloInicio ? jugadorFalloInicio.nombre : '';
+        sala.turnoApuesta = primerTurno;
         
         io.to(sala.id).emit('fase_apuestas', {
             jugadores: jugadoresInfo,
@@ -1519,9 +1527,10 @@ io.on('connection', (socket) => {
         if (tipoApuesta === 'paso') {
             sala.jugadoresPasaron.add(jugador);
             const apuestaId = Date.now() + '_' + jugador;
-            io.to(salaActual).emit("apuesta_realizada", {
-                id: apuestaId, jugador: jugadorData.nombre, tipo: 'paso', mensaje: `${jugadorData.nombre} PASA`
-            });
+            const apuestaObj = { id: apuestaId, jugador: jugadorData.nombre, tipo: 'paso', mensaje: `${jugadorData.nombre} PASA` };
+            sala.historialApuestas = sala.historialApuestas || [];
+            sala.historialApuestas.push(apuestaObj);
+            io.to(salaActual).emit("apuesta_realizada", apuestaObj);
             
             if (sala.jugadoresPasaron.size === 4) {
                 console.log(`✅ Todos los jugadores pasaron. Iniciando juego normal...`);
@@ -1533,6 +1542,7 @@ io.on('connection', (socket) => {
             const siguienteIdx = (totalRespuestas + 1) % 4;
             const siguienteId = sala.ordenJugadores[(sala.manoIndex + 1 + siguienteIdx) % 4];
             const siguiente = sala.users.get(siguienteId);
+            sala.turnoApuesta = siguienteId;
             io.to(salaActual).emit("turno_apuesta", {
                 jugadorId: siguienteId, jugadorNombre: siguiente ? siguiente.nombre : '',
                 apuestaActual: sala.apuestaActual, mensaje: `Turno de ${siguiente ? siguiente.nombre : ''}`
@@ -1561,10 +1571,10 @@ io.on('connection', (socket) => {
             sala.cuatrolaBazasGanadas = 0;
             
             const apuestaId = Date.now() + '_' + jugador;
-            io.to(salaActual).emit("apuesta_realizada", {
-                id: apuestaId, jugador: jugadorData.nombre, tipo: tipoApuesta, valor: apuesta.valor,
-                mensaje: `${jugadorData.nombre} apuesta ${tipoApuesta.toUpperCase()} (${apuesta.valor} pts)`
-            });
+            const apuestaObjEsp = { id: apuestaId, jugador: jugadorData.nombre, tipo: tipoApuesta, valor: apuesta.valor, mensaje: `${jugadorData.nombre} apuesta ${tipoApuesta.toUpperCase()} (${apuesta.valor} pts)` };
+            sala.historialApuestas = sala.historialApuestas || [];
+            sala.historialApuestas.push(apuestaObjEsp);
+            io.to(salaActual).emit("apuesta_realizada", apuestaObjEsp);
             
             sala.faseApuestas = false;
             iniciarJuegoConApuesta(sala, salaActual);
@@ -1572,10 +1582,10 @@ io.on('connection', (socket) => {
         }
         
         const apuestaId = Date.now() + '_' + jugador;
-        io.to(salaActual).emit("apuesta_realizada", {
-            id: apuestaId, jugador: jugadorData.nombre, tipo: tipoApuesta, valor: apuesta.valor,
-            mensaje: `${jugadorData.nombre} PASA`
-        });
+        const apuestaObjNorm = { id: apuestaId, jugador: jugadorData.nombre, tipo: tipoApuesta, valor: apuesta.valor, mensaje: `${jugadorData.nombre} PASA` };
+        sala.historialApuestas = sala.historialApuestas || [];
+        sala.historialApuestas.push(apuestaObjNorm);
+        io.to(salaActual).emit("apuesta_realizada", apuestaObjNorm);
         
         if (totalRespuestas + 1 >= 4) {
             sala.faseApuestas = false;
@@ -1586,6 +1596,7 @@ io.on('connection', (socket) => {
         const siguienteIdx = (totalRespuestas + 1) % 4;
         const siguienteId = sala.ordenJugadores[(sala.manoIndex + 1 + siguienteIdx) % 4];
         const siguiente = sala.users.get(siguienteId);
+        sala.turnoApuesta = siguienteId;
         io.to(salaActual).emit("turno_apuesta", {
             jugadorId: siguienteId, jugadorNombre: siguiente ? siguiente.nombre : '',
             apuestaActual: sala.apuestaActual, mensaje: `Turno de ${siguiente ? siguiente.nombre : ''}`
@@ -1745,7 +1756,22 @@ io.on('connection', (socket) => {
         
         console.log(`♻️ ${datosJugador.nombre} reconectado en ${salaId} (nuevo id: ${socket.id})`);
         
-        // Notificar al jugador reconectado su estado actual
+        // Construir info completa de jugadores y equipos para el cliente
+        const jugadoresArray = Array.from(sala.users.entries());
+        const equiposInfo = {};
+        const companerosInfo = {};
+        sala.users.forEach((data, id) => {
+            equiposInfo[id] = { equipo: data.equipo, numero: data.numeroJugador };
+        });
+        // Calcular compañeros (mismo equipo)
+        sala.users.forEach((data, id) => {
+            const companero = jugadoresArray.find(([cid, cdata]) => cid !== id && cdata.equipo === data.equipo);
+            if (companero) {
+                companerosInfo[id] = { companeroId: companero[0], nombre: companero[1].nombre };
+            }
+        });
+
+        // Notificar al jugador reconectado su estado actual completo
         socket.emit("reconnected", {
             mensaje: `Bienvenido de vuelta, ${datosJugador.nombre}`,
             cartas: datosJugador.cartas,
@@ -1754,7 +1780,20 @@ io.on('connection', (socket) => {
             faseApuestas: sala.faseApuestas,
             juegoActivo: sala.juegoActivo,
             cartasRonda: sala.cartasRonda || [],
-            bazasMano: sala.bazasJugadasMano || 0
+            bazasMano: sala.bazasJugadasMano || 0,
+            jugadores: jugadoresArray,
+            equiposInfo,
+            companerosInfo,
+            miEquipo: datosJugador.equipo,
+            puntosRondaA: sala.puntosRondaEquipoA || 0,
+            puntosRondaB: sala.puntosRondaEquipoB || 0,
+            nombresEquipoA: jugadoresArray.filter(([,d]) => d.equipo === 'A').map(([,d]) => d.nombre),
+            nombresEquipoB: jugadoresArray.filter(([,d]) => d.equipo === 'B').map(([,d]) => d.nombre),
+            compañeroNoJuega: sala.compañeroNoJuega,
+            historialApuestas: sala.historialApuestas || [],
+            apuestaActual: sala.apuestaActual || null,
+            turnoApuesta: sala.turnoApuesta || null,
+            jugadorFalloNombre: sala.jugadorFalloNombre || null
         });
         
         // Notificar al resto que el jugador volvió
