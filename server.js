@@ -2,7 +2,16 @@ import express from "express";
 import { Server as SocketServer } from "socket.io";
 import http from 'http'
 import cors from 'cors'
+import morgan from 'morgan'
 import { register, login, getUserById, verifyToken, updateStats, resetStats, getLeaderboard, selectSkin, authMiddleware, ensureDefaultUsers } from './auth.js';
+
+// Logger con timestamp para producción
+const timestamp = () => new Date().toISOString();
+const log = (level, msg, data) => {
+    const ts = timestamp();
+    const dataStr = data ? JSON.stringify(data) : '';
+    console.log(`[${ts}] [${level}] ${msg} ${dataStr}`);
+};
 
 const PORT = process.env.PORT || 4000
 
@@ -16,6 +25,10 @@ const io = new SocketServer(server, {
 
 app.use(cors())
 app.use(express.json())
+// Logging HTTP requests para Render
+app.use(morgan(':method :url :status :response-time ms - :res[content-length]', {
+    skip: (req) => req.url === '/health' // Skip health checks
+}))
 
 // Cartas disponibles para el juego
 const cartasDisponibles = ['1DeOros', '3DeOros', '10DeOros', '11DeOros', '12DeOros',
@@ -965,8 +978,12 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-    console.log("Nuevo cliente: " + socket.id);
+    log('INFO', 'Socket connected', { socketId: socket.id, transport: socket.conn.transport.name });
     let salaActual = null;
+    
+    // Log de IP (útil para debugging)
+    const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
+    log('DEBUG', 'Client IP', { socketId: socket.id, ip: clientIp });
 
     // Enviar estado actual de todas las salas al cliente recién conectado
     salas.forEach((sala, salaId) => {
@@ -977,6 +994,7 @@ io.on('connection', (socket) => {
     socket.on("unirse_sala", (numeroSala, nombre) => {
         const salaId = `sala${numeroSala}`;
         const sala = salas.get(salaId);
+        log('INFO', 'unirse_sala', { socketId: socket.id, salaId, nombre });
         
         if (!sala) {
             socket.emit("error_sala", "Sala no existe");
@@ -1006,6 +1024,7 @@ io.on('connection', (socket) => {
         // Unirse a nueva sala
         salaActual = salaId;
         socket.join(salaId);
+        log('INFO', 'Jugador unido a sala', { socketId: socket.id, salaId, nombre, totalJugadores: sala.users.size });
         
         let datos_usuario = {
             nombre: nombre,
@@ -1612,6 +1631,7 @@ io.on('connection', (socket) => {
     
     // Reconexión de jugador (vuelve tras perder conexión por pantalla apagada / cambio de app)
     socket.on("reconnect_player", ({ nombre, salaId }) => {
+        log('INFO', 'Reconnect player attempt', { socketId: socket.id, nombre, salaId });
         const key = `${nombre}::${salaId}`;
         const guardado = jugadoresDesconectados.get(key);
         if (!guardado) {
@@ -1673,6 +1693,7 @@ io.on('connection', (socket) => {
 
     // Salida voluntaria de sala (al terminar partida)
     socket.on("salir_sala", () => {
+        log('INFO', 'salir_sala', { socketId: socket.id, salaActual });
         if (!salaActual) return;
         const sala = salas.get(salaActual);
         if (!sala) return;
@@ -1711,8 +1732,8 @@ io.on('connection', (socket) => {
     });
 
     // Desconexión
-    socket.on("disconnect", () => {
-        console.log("Desconectado: " + socket.id);
+    socket.on("disconnect", (reason) => {
+        log('INFO', 'Socket disconnected', { socketId: socket.id, reason, salaActual });
         if (salaActual) {
             const sala = salas.get(salaActual);
             if (sala) {
@@ -1826,8 +1847,10 @@ io.on('connection', (socket) => {
 // Registro
 app.post('/api/auth/register', async (req, res) => {
     const { username, email, password } = req.body;
+    log('INFO', 'Register attempt', { username, email });
     
     if (!username || !email || !password) {
+        log('WARN', 'Register failed - missing fields', { username, email });
         return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
     
@@ -1839,8 +1862,10 @@ app.post('/api/auth/register', async (req, res) => {
 
     if (result.success) {
         activeSessions.set(result.user.id, result.token);
+        log('INFO', 'Register success', { userId: result.user.id, username });
         res.json(result);
     } else {
+        log('WARN', 'Register failed', { username, error: result.error });
         res.status(400).json(result);
     }
 });
@@ -1848,8 +1873,10 @@ app.post('/api/auth/register', async (req, res) => {
 // Login
 app.post('/api/auth/login', async (req, res) => {
     const { usernameOrEmail, password } = req.body;
+    log('INFO', 'Login attempt', { usernameOrEmail });
 
     if (!usernameOrEmail || !password) {
+        log('WARN', 'Login failed - missing fields', { usernameOrEmail });
         return res.status(400).json({ error: 'Faltan campos requeridos' });
     }
 
@@ -1859,19 +1886,23 @@ app.post('/api/auth/login', async (req, res) => {
         if (activeSessions.has(result.user.id)) {
             const storedToken = activeSessions.get(result.user.id);
             if (verifyToken(storedToken)) {
+                log('WARN', 'Login rejected - session already active', { userId: result.user.id, usernameOrEmail });
                 return res.status(409).json({ success: false, error: 'Ya existe una sesión activa para este usuario. Cierra la sesión anterior antes de iniciar una nueva.' });
             }
             activeSessions.delete(result.user.id);
         }
         activeSessions.set(result.user.id, result.token);
+        log('INFO', 'Login success', { userId: result.user.id, username: result.user.username });
         res.json(result);
     } else {
+        log('WARN', 'Login failed', { usernameOrEmail, error: result.error });
         res.status(401).json(result);
     }
 });
 
 // Logout
 app.post('/api/auth/logout', authMiddleware, (req, res) => {
+    log('INFO', 'Logout', { userId: req.userId });
     activeSessions.delete(req.userId);
     res.json({ success: true });
 });
@@ -1940,7 +1971,32 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Admin - Estado del servidor (útil para debugging en Render)
+app.get('/api/admin/status', (req, res) => {
+    const salasEstado = {};
+    salas.forEach((sala, id) => {
+        salasEstado[id] = {
+            jugadores: sala.users.size,
+            juegoIniciado: sala.juegoIniciado,
+            puntosA: sala.puntosRondaEquipoA,
+            puntosB: sala.puntosRondaEquipoB
+        };
+    });
+    
+    res.json({
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        activeSessions: activeSessions.size,
+        jugadoresDesconectados: jugadoresDesconectados.size,
+        botsActivos: botsActivos.size,
+        salas: salasEstado
+    });
+});
+
 server.listen(PORT, async () => {
-    console.log('Server iniciado en puerto: ', PORT);
+    log('INFO', 'Server started', { port: PORT, env: process.env.NODE_ENV || 'development' });
+    log('INFO', 'Active sessions tracking', { sessionsCount: activeSessions.size });
     await ensureDefaultUsers();
+    log('INFO', 'Default users ensured');
 });
