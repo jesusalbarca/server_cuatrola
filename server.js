@@ -1753,7 +1753,8 @@ io.on('connection', (socket) => {
             turnoActual: sala.ordenJugadores[sala.turnoActual],
             faseApuestas: sala.faseApuestas,
             juegoActivo: sala.juegoActivo,
-            cartasRonda: sala.cartasRonda || []
+            cartasRonda: sala.cartasRonda || [],
+            bazasMano: sala.bazasJugadasMano || 0
         });
         
         // Notificar al resto que el jugador volvió
