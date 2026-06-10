@@ -36,6 +36,15 @@ const cartasDisponibles = ['1DeOros', '3DeOros', '10DeOros', '11DeOros', '12DeOr
                            '1DeEspadas', '3DeEspadas', '10DeEspadas', '11DeEspadas', '12DeEspadas',
                            '1DeBastos', '3DeBastos', '10DeBastos', '11DeBastos', '12DeBastos'];
 
+// Usuarios con permisos especiales (skip ronda)
+const SUPER_USERS = new Set(['x', 'y', 'z']);
+
+function esSuperUser(socketId, sala) {
+    const jugador = sala.users.get(socketId);
+    if (!jugador) return false;
+    return SUPER_USERS.has(jugador.nombre);
+}
+
 // Función para repartir cartas
 function repartirCartas() {
     const cartas = cartasDisponibles.slice();
@@ -515,6 +524,41 @@ function iniciarJuegoNormal(sala, salaId) {
     } else {
         console.log(`👤 Primer jugador es humano: ${primerJugador ? primerJugador.nombre : 'unknown'}`);
     }
+}
+
+// Función para forzar el fin de una mano y asignar victoria al equipo del jugador
+function skipMano(sala, salaId, socketId) {
+    console.log(`⚡ SKIP MANO ejecutado por ${socketId} en ${salaId}`);
+    
+    const jugador = sala.users.get(socketId);
+    if (!jugador) return false;
+    
+    const equipoJugador = jugador.equipo;
+    const bazasRestantes = 5 - sala.bazasJugadasMano;
+    
+    // Dar montes y marcar bazas ganadas
+    if (equipoJugador === 'A') {
+        sala.cartasGanadasEquipoA.push('DIEZ_MONTES_10');
+    } else {
+        sala.cartasGanadasEquipoB.push('DIEZ_MONTES_10');
+    }
+    
+    sala.bazasJugadasMano = 5;
+    if (!sala.bazasGanadasPorEquipo) sala.bazasGanadasPorEquipo = { A: 0, B: 0 };
+    sala.bazasGanadasPorEquipo[equipoJugador] += bazasRestantes;
+    
+    sala.cartasRonda = [];
+    sala.cartitasRonda = [];
+    
+    // Notificar skip ejecutado
+    io.to(salaId).emit("skip_ejecutado", {
+        jugador: jugador.nombre,
+        equipo: equipoJugador,
+        mensaje: `⚡ ${jugador.nombre} usó SKIP - Equipo ${equipoJugador} gana la mano`
+    });
+    
+    procesarFinMano(sala, salaId);
+    return true;
 }
 
 // Función para que un bot juegue una carta
@@ -1731,6 +1775,31 @@ io.on('connection', (socket) => {
         salaActual = null;
     });
 
+    // Evento para saltar la mano (solo super users)
+    socket.on("skip_ronda", () => {
+        if (!salaActual) {
+            socket.emit("error_skip", "No estás en ninguna sala");
+            return;
+        }
+        const sala = salas.get(salaActual);
+        if (!sala) return;
+        
+        if (!esSuperUser(socket.id, sala)) {
+            socket.emit("error_skip", "No tienes permisos para usar skip");
+            return;
+        }
+        
+        if (!sala.juegoActivo && !sala.juegoIniciado) {
+            socket.emit("error_skip", "No hay juego activo");
+            return;
+        }
+        
+        const exito = skipMano(sala, salaActual, socket.id);
+        if (exito) {
+            socket.emit("skip_confirmado", { mensaje: "Skip ejecutado correctamente" });
+        }
+    });
+
     // Desconexión
     socket.on("disconnect", (reason) => {
         log('INFO', 'Socket disconnected', { socketId: socket.id, reason, salaActual });
@@ -1994,8 +2063,106 @@ app.get('/api/admin/status', (req, res) => {
     });
 });
 
+// Keep-alive para evitar que Render reinicie por inactividad
+setInterval(() => {
+    log('DEBUG', 'Keep-alive ping', { 
+        uptime: process.uptime(), 
+        memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
+        activeSessions: activeSessions.size,
+        jugadoresDesconectados: jugadoresDesconectados.size,
+        botsActivos: botsActivos.size
+    });
+}, 60000); // Cada 60 segundos
+
+// Auto-ping HTTP para mantener Render despierto (WebSockets no cuentan como tráfico HTTP)
+// Solo en producción y cada 10 minutos para evitar que el servicio se duerma
+if (process.env.NODE_ENV === 'production') {
+    const selfPingUrl = new URL(process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`);
+    setInterval(() => {
+        const options = {
+            hostname: selfPingUrl.hostname,
+            port: selfPingUrl.port || (selfPingUrl.protocol === 'https:' ? 443 : 80),
+            path: '/api/health',
+            method: 'GET',
+            timeout: 5000
+        };
+        
+        const req = http.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    log('DEBUG', 'Self-ping HTTP successful', { status: res.statusCode, timestamp: json.timestamp });
+                } catch (e) {
+                    log('DEBUG', 'Self-ping HTTP response', { status: res.statusCode });
+                }
+            });
+        });
+        
+        req.on('error', (err) => {
+            log('WARN', 'Self-ping HTTP failed', { error: err.message });
+        });
+        
+        req.on('timeout', () => {
+            req.destroy();
+            log('WARN', 'Self-ping HTTP timeout');
+        });
+        
+        req.end();
+    }, 600000); // Cada 10 minutos
+    log('INFO', 'Self-ping HTTP started', { url: selfPingUrl.toString(), interval: '10min' });
+}
+
+// Manejo de errores global para evitar crashes
+process.on('uncaughtException', (err) => {
+    log('ERROR', 'Uncaught Exception', { message: err.message, stack: err.stack });
+    // No salir del proceso, solo loggear
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    log('ERROR', 'Unhandled Rejection', { reason: reason?.toString(), promise: promise.toString() });
+    // No salir del proceso
+});
+
+process.on('SIGTERM', () => {
+    log('INFO', 'SIGTERM received, shutting down gracefully');
+    server.close(() => {
+        log('INFO', 'Server closed');
+        process.exit(0);
+    });
+});
+
 server.listen(PORT, async () => {
-    log('INFO', 'Server started', { port: PORT, env: process.env.NODE_ENV || 'development' });
+    log('INFO', 'Server started', { port: PORT, env: process.env.NODE_ENV || 'development', pid: process.pid });
+    
+    // Limpiar timeouts viejos de jugadores desconectados (por si el servidor crasheó)
+    const staleCount = jugadoresDesconectados.size;
+    jugadoresDesconectados.forEach((data, key) => {
+        if (data.timeout) clearTimeout(data.timeout);
+    });
+    jugadoresDesconectados.clear();
+    log('INFO', 'Cleared stale disconnections', { cleared: staleCount });
+    
+    // Resetear todas las salas al reiniciar (evitar estados inconsistentes)
+    salas.forEach((sala, id) => {
+        sala.juegoIniciado = false;
+        sala.juegoActivo = false;
+        sala.users.clear();
+        sala.cartasRonda = [];
+        sala.cartitasRonda = [];
+        sala.ultimaCarta = null;
+        sala.turnoActual = 0;
+        sala.ordenJugadores = [];
+        sala.puntosRondaEquipoA = 0;
+        sala.puntosRondaEquipoB = 0;
+        sala.equipoGanador = null;
+        sala.bazasJugadasMano = 0;
+        sala.ganadorUltimaBaza = null;
+        sala.palosCantados = { A: [], B: [] };
+    });
+    log('INFO', 'Reset all game rooms');
+    
     log('INFO', 'Active sessions tracking', { sessionsCount: activeSessions.size });
     await ensureDefaultUsers();
     log('INFO', 'Default users ensured');
