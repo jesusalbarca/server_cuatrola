@@ -759,25 +759,30 @@ function procesarFinBaza(sala, salaId) {
         
         function verificarCantar(cartasJugador) {
             const palos = ['Bastos', 'Copas', 'Espadas', 'Oros'];
+            const opciones = [];
             for (const palo of palos) {
                 if (sala.palosCantados[equipoGanador].includes(palo)) continue;
                 const tiene11 = cartasJugador.some(c => c === `11De${palo}`);
                 const tiene12 = cartasJugador.some(c => c === `12De${palo}`);
                 if (tiene11 && tiene12) {
                     const esPaloTriunfo = paloTriunfo && palo === paloTriunfo;
-                    return { puede: true, palo: palo, esTriunfo: esPaloTriunfo, puntos: esPaloTriunfo ? 40 : 20 };
+                    opciones.push({ palo, esTriunfo: esPaloTriunfo, puntos: esPaloTriunfo ? 40 : 20 });
                 }
             }
-            return { puede: false };
+            return opciones;
         }
         
         for (const [id, data] of jugadoresDelEquipo) {
-            const cantarInfo = verificarCantar(data.cartas);
-            if (cantarInfo.puede) {
+            const opciones = verificarCantar(data.cartas);
+            if (opciones.length > 0) {
                 jugadoresQuePuedenCantar.push({
                     jugadorId: id,
                     jugadorName: data.nombre,
-                    ...cantarInfo
+                    opciones,
+                    // Compat: exponer el primer/mejor canto directamente
+                    palo: opciones[0].palo,
+                    esTriunfo: opciones[0].esTriunfo,
+                    puntos: opciones[0].puntos
                 });
             }
         }
@@ -1396,6 +1401,29 @@ io.on('connection', (socket) => {
         });
         
         console.log(`${jugadorData.nombre} cantó ${puntos} puntos (${datosCantar.palo})`);
+
+        // Calcular si le quedan más opciones de cante en esta baza
+        const paloTriunfoAhora = sala.ultimaCarta ? sala.ultimaCarta.split('De')[1] : null;
+        const opcionesRestantes = [];
+        const palos = ['Bastos', 'Copas', 'Espadas', 'Oros'];
+        for (const p of palos) {
+            if (sala.palosCantados[equipo].includes(p)) continue;
+            const tiene11 = jugadorData.cartas.some(c => c === `11De${p}`);
+            const tiene12 = jugadorData.cartas.some(c => c === `12De${p}`);
+            if (tiene11 && tiene12) {
+                const esPaloTriunfo = paloTriunfoAhora && p === paloTriunfoAhora;
+                opcionesRestantes.push({ palo: p, esTriunfo: esPaloTriunfo, puntos: esPaloTriunfo ? 40 : 20 });
+            }
+        }
+        if (opcionesRestantes.length > 0) {
+            socket.emit('cantar_opciones_restantes', {
+                jugadorId: jugador,
+                opciones: opcionesRestantes,
+                palo: opcionesRestantes[0].palo,
+                esTriunfo: opcionesRestantes[0].esTriunfo,
+                puntos: opcionesRestantes[0].puntos
+            });
+        }
     });
     
     // Funciones auxiliares para apuestas
