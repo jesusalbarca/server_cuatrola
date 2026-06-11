@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import bcrypt from 'bcryptjs';
