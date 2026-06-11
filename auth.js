@@ -148,23 +148,31 @@ export async function resetStats(userId) {
     return { success: true };
 }
 
+const LEADERBOARD_BLOCKED_NAMES = new Set(['admin', 'godmode']);
+
 export async function getLeaderboard(limit = 20) {
     const { data } = await supabase
         .from('user_stats')
         .select('user_id, games_played, games_won, hands_won, total_points, mesas_limpias, users(username)')
         .order('games_won', { ascending: false })
-        .limit(limit);
+        .limit(limit * 5);
 
-    const leaderboard = (data || []).map(s => ({
-        id: s.user_id,
-        username: s.users?.username ?? '?',
-        gamesPlayed:  s.games_played,
-        gamesWon:     s.games_won,
-        handsWon:     s.hands_won,
-        totalPoints:  s.total_points,
-        mesasLimpias: s.mesas_limpias,
-        winRate: s.games_played > 0 ? Math.round((s.games_won / s.games_played) * 100) : 0
-    }));
+    const leaderboard = (data || [])
+        .filter(s => {
+            const name = s.users?.username ?? '';
+            return name.length >= 4 && !LEADERBOARD_BLOCKED_NAMES.has(name.toLowerCase());
+        })
+        .slice(0, limit)
+        .map(s => ({
+            id: s.user_id,
+            username: s.users?.username ?? '?',
+            gamesPlayed:  s.games_played,
+            gamesWon:     s.games_won,
+            handsWon:     s.hands_won,
+            totalPoints:  s.total_points,
+            mesasLimpias: s.mesas_limpias,
+            winRate: s.games_played > 0 ? Math.round((s.games_won / s.games_played) * 100) : 0
+        }));
 
     return { success: true, leaderboard };
 }
