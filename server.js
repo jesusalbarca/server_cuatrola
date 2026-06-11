@@ -126,6 +126,61 @@ function calcularGanadorRonda(ultimaCarta, cartasRonda, users) {
 const salas = new Map();
 const MAX_SALAS = 10;
 
+// ===== SALAS PRIVADAS =====
+const salasPrivadas = new Map(); // codigo -> sala
+const CONSONANTES = 'BCDFGHJKLMNPQRSTVWXYZ';
+
+function generarCodigo() {
+    let codigo;
+    do {
+        codigo = Array.from({ length: 6 }, () => CONSONANTES[Math.floor(Math.random() * CONSONANTES.length)]).join('');
+    } while (salasPrivadas.has(codigo));
+    return codigo;
+}
+
+function plantillaSala(id, nombre) {
+    return {
+        id, nombre,
+        users: new Map(),
+        cartasRonda: [],
+        cartitasRonda: [],
+        ultimaCarta: null,
+        todos_limpian: 0,
+        juegoIniciado: false,
+        juegoActivo: false,
+        turnoActual: 0,
+        ordenJugadores: [],
+        puntosRondaEquipoA: 0,
+        puntosRondaEquipoB: 0,
+        equipoGanador: null,
+        cartasGanadasEquipoA: [],
+        cartasGanadasEquipoB: [],
+        bazasJugadasMano: 0,
+        ganadorUltimaBaza: null,
+        palosCantados: { A: [], B: [] }
+    };
+}
+
+function crearSalaPrivada() {
+    const codigo = generarCodigo();
+    const salaId = `private_${codigo}`;
+    const sala = { ...plantillaSala(salaId, `Sala ${codigo}`), codigo, privada: true, creadaEn: Date.now() };
+    salas.set(salaId, sala);
+    salasPrivadas.set(codigo, sala);
+    log('INFO', 'Sala privada creada', { salaId, codigo });
+    return sala;
+}
+
+function limpiarSalaPrivada(sala) {
+    if (!sala.privada) return;
+    // Si la sala sigue vacía, eliminarla
+    if (sala.users.size === 0) {
+        salas.delete(sala.id);
+        salasPrivadas.delete(sala.codigo);
+        log('INFO', 'Sala privada eliminada', { salaId: sala.id });
+    }
+}
+
 // Inicializar salas
 for (let i = 1; i <= MAX_SALAS; i++) {
     salas.set(`sala${i}`, {
@@ -1015,10 +1070,11 @@ function procesarFinMano(sala, salaId) {
     }
 }
 
-// Endpoint para obtener estado de salas
+// Endpoint para obtener estado de salas (solo salas públicas)
 app.get('/', (req, res) => {
     const estadoSalas = [];
     salas.forEach((sala, id) => {
+        if (sala.privada) return;
         estadoSalas.push({
             id: id,
             nombre: sala.nombre,
@@ -1030,6 +1086,19 @@ app.get('/', (req, res) => {
     res.json({ salas: estadoSalas });
 });
 
+// Endpoint para validar sala privada por código
+app.get('/api/sala-privada/:codigo', (req, res) => {
+    const codigo = req.params.codigo.toUpperCase();
+    const sala = salasPrivadas.get(codigo);
+    if (!sala) return res.json({ existe: false });
+    res.json({
+        existe: true,
+        salaId: sala.id,
+        jugadores: sala.users.size,
+        juegoIniciado: sala.juegoIniciado
+    });
+});
+
 io.on('connection', (socket) => {
     log('INFO', 'Socket connected', { socketId: socket.id, transport: socket.conn.transport.name });
     let salaActual = null;
@@ -1038,8 +1107,9 @@ io.on('connection', (socket) => {
     const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
     log('DEBUG', 'Client IP', { socketId: socket.id, ip: clientIp });
 
-    // Enviar estado actual de todas las salas al cliente recién conectado
+    // Enviar estado actual de salas públicas al cliente recién conectado
     salas.forEach((sala, salaId) => {
+        if (sala.privada) return;
         socket.emit("salas_actualizado", { salaId, contador: sala.users.size });
     });
 
@@ -1108,9 +1178,63 @@ io.on('connection', (socket) => {
         }
     });
     
+    // Evento: crear sala privada
+    socket.on("crear_sala_privada", () => {
+        const sala = crearSalaPrivada();
+        socket.emit("sala_privada_creada", { codigo: sala.codigo, salaId: sala.id });
+    });
+
+    // Evento: unirse a sala privada por código
+    socket.on("unirse_sala_privada", (codigo, nombre) => {
+        const codigoUpper = (codigo || '').toUpperCase().trim();
+        const sala = salasPrivadas.get(codigoUpper);
+        log('INFO', 'unirse_sala_privada', { socketId: socket.id, codigo: codigoUpper, nombre });
+
+        if (!sala) {
+            socket.emit("error_sala", "Código incorrecto o sala no encontrada");
+            return;
+        }
+        if (sala.juegoIniciado) {
+            socket.emit("error_sala", "El juego ya ha comenzado en esta sala");
+            return;
+        }
+        if (sala.users.size >= 4) {
+            socket.emit("error_sala", "Sala llena (máximo 4 jugadores)");
+            return;
+        }
+
+        // Salir de sala anterior
+        if (salaActual) {
+            socket.leave(salaActual);
+            const salaAnterior = salas.get(salaActual);
+            if (salaAnterior) {
+                salaAnterior.users.delete(socket.id);
+                socket.to(salaActual).emit("jugador_salio", socket.id);
+                if (salaAnterior.privada) limpiarSalaPrivada(salaAnterior);
+            }
+        }
+
+        salaActual = sala.id;
+        socket.join(sala.id);
+
+        const datos_usuario = { nombre, cartas: [], socketId: socket.id };
+        sala.users.set(socket.id, datos_usuario);
+
+        console.log(`${nombre} se unió a sala privada ${sala.id} (${codigoUpper}). Jugadores: ${sala.users.size}/4`);
+
+        const usersArray = Array.from(sala.users);
+        io.to(sala.id).emit("actualizar_sala", { salaId: sala.id, jugadores: usersArray, contador: sala.users.size });
+        socket.emit("sala_unida", { salaId: sala.id, nombre: sala.nombre, codigo: codigoUpper, privada: true });
+
+        if (sala.users.size === 4) {
+            setTimeout(() => iniciarJuego(sala), 500);
+        }
+    });
+
     // Evento para activar bots y completar la sala
     socket.on("activar_bots", (numeroSala) => {
-        const salaId = `sala${numeroSala}`;
+        // Acepta tanto número de sala pública como salaId directo (salas privadas)
+        const salaId = salas.has(`sala${numeroSala}`) ? `sala${numeroSala}` : String(numeroSala || '');
         const sala = salas.get(salaId);
         
         if (!sala) {
@@ -1170,7 +1294,7 @@ io.on('connection', (socket) => {
     
     // Evento para quitar bots de una sala
     socket.on("quitar_bots", (numeroSala) => {
-        const salaId = `sala${numeroSala}`;
+        const salaId = salas.has(`sala${numeroSala}`) ? `sala${numeroSala}` : String(numeroSala || '');
         const sala = salas.get(salaId);
         
         if (!sala || sala.juegoIniciado) {
@@ -1212,6 +1336,7 @@ io.on('connection', (socket) => {
             });
             io.emit("salas_actualizado", { salaId: salaActual, contador: sala.users.size });
             log('INFO', 'salir_sala', { socketId: socket.id, salaId: salaActual });
+            if (sala.privada && sala.users.size === 0) limpiarSalaPrivada(sala);
         }
         socket.leave(salaActual);
         salaActual = null;
@@ -1841,23 +1966,27 @@ io.on('connection', (socket) => {
 
         if (sala.users.size === 0) {
             eliminarBotsDeSala(sala);
-            sala.juegoIniciado = false;
-            sala.juegoActivo = false;
-            sala.cartasRonda = [];
-            sala.cartitasRonda = [];
-            sala.ultimaCarta = null;
-            sala.todos_limpian = 0;
-            sala.turnoActual = 0;
-            sala.ordenJugadores = [];
-            sala.puntosRondaEquipoA = 0;
-            sala.puntosRondaEquipoB = 0;
-            sala.equipoGanador = null;
-            sala.cartasGanadasEquipoA = [];
-            sala.cartasGanadasEquipoB = [];
-            sala.bazasJugadasMano = 0;
-            sala.ganadorUltimaBaza = null;
-            sala.palosCantados = { A: [], B: [] };
-            console.log(`🔄 Sala ${salaActual} reseteada completamente`);
+            if (sala.privada) {
+                setTimeout(() => limpiarSalaPrivada(sala), 5000);
+            } else {
+                sala.juegoIniciado = false;
+                sala.juegoActivo = false;
+                sala.cartasRonda = [];
+                sala.cartitasRonda = [];
+                sala.ultimaCarta = null;
+                sala.todos_limpian = 0;
+                sala.turnoActual = 0;
+                sala.ordenJugadores = [];
+                sala.puntosRondaEquipoA = 0;
+                sala.puntosRondaEquipoB = 0;
+                sala.equipoGanador = null;
+                sala.cartasGanadasEquipoA = [];
+                sala.cartasGanadasEquipoB = [];
+                sala.bazasJugadasMano = 0;
+                sala.ganadorUltimaBaza = null;
+                sala.palosCantados = { A: [], B: [] };
+                console.log(`🔄 Sala ${salaActual} reseteada completamente`);
+            }
         }
 
         salaActual = null;
@@ -1923,6 +2052,9 @@ io.on('connection', (socket) => {
                                 salaAun.ordenJugadores = [];
                                 io.to(salaActual).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
                             }
+                            if (salaAun.privada && salaAun.users.size === 0) {
+                                setTimeout(() => limpiarSalaPrivada(salaAun), 5000);
+                            }
                         }
                     }, 30000);
                     
@@ -1974,25 +2106,30 @@ io.on('connection', (socket) => {
                     io.to(salaActual).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
                 }
                 
-                // Si la sala quedó vacía, reiniciar completamente
+                // Si la sala quedó vacía, reiniciar o eliminar (si es privada)
                 if (sala.users.size === 0) {
                     eliminarBotsDeSala(sala);
-                    sala.juegoIniciado = false;
-                    sala.juegoActivo = false;
-                    sala.cartasRonda = [];
-                    sala.cartitasRonda = [];
-                    sala.ultimaCarta = null;
-                    sala.todos_limpian = 0;
-                    sala.turnoActual = 0;
-                    sala.ordenJugadores = [];
-                    sala.puntosRondaEquipoA = 0;
-                    sala.puntosRondaEquipoB = 0;
-                    sala.equipoGanador = null;
-                    sala.cartasGanadasEquipoA = [];
-                    sala.cartasGanadasEquipoB = [];
-                    sala.bazasJugadasMano = 0;
-                    sala.ganadorUltimaBaza = null;
-                    sala.palosCantados = { A: [], B: [] };
+                    if (sala.privada) {
+                        // Salas privadas: destruir tras un pequeño delay
+                        setTimeout(() => limpiarSalaPrivada(sala), 5000);
+                    } else {
+                        sala.juegoIniciado = false;
+                        sala.juegoActivo = false;
+                        sala.cartasRonda = [];
+                        sala.cartitasRonda = [];
+                        sala.ultimaCarta = null;
+                        sala.todos_limpian = 0;
+                        sala.turnoActual = 0;
+                        sala.ordenJugadores = [];
+                        sala.puntosRondaEquipoA = 0;
+                        sala.puntosRondaEquipoB = 0;
+                        sala.equipoGanador = null;
+                        sala.cartasGanadasEquipoA = [];
+                        sala.cartasGanadasEquipoB = [];
+                        sala.bazasJugadasMano = 0;
+                        sala.ganadorUltimaBaza = null;
+                        sala.palosCantados = { A: [], B: [] };
+                    }
                 }
             }
         }
