@@ -1,6 +1,7 @@
 import express from "express";
 import { Server as SocketServer } from "socket.io";
 import http from 'http'
+import https from 'https'
 import cors from 'cors'
 import morgan from 'morgan'
 import { register, login, getUserById, verifyToken, updateStats, resetStats, getLeaderboard, selectSkin, authMiddleware, ensureDefaultUsers } from './auth.js';
@@ -1336,7 +1337,11 @@ io.on('connection', (socket) => {
             });
             io.emit("salas_actualizado", { salaId: salaActual, contador: sala.users.size });
             log('INFO', 'salir_sala', { socketId: socket.id, salaId: salaActual });
-            if (sala.privada && sala.users.size === 0) limpiarSalaPrivada(sala);
+            // Si la sala quedó vacía, eliminar bots y limpiar sala privada
+            if (sala.users.size === 0) {
+                eliminarBotsDeSala(sala);
+                if (sala.privada) limpiarSalaPrivada(sala);
+            }
         }
         socket.leave(salaActual);
         salaActual = null;
@@ -1867,6 +1872,9 @@ io.on('connection', (socket) => {
             return;
         }
         
+        // Marcar como reconectado para que el timeout ignore este jugador
+        guardado.reconectado = true;
+        
         // Cancelar el timeout de eliminación
         clearTimeout(guardado.timeout);
         jugadoresDesconectados.delete(key);
@@ -2019,41 +2027,56 @@ io.on('connection', (socket) => {
 
     // Desconexión
     socket.on("disconnect", (reason) => {
-        log('INFO', 'Socket disconnected', { socketId: socket.id, reason, salaActual });
-        if (salaActual) {
-            const sala = salas.get(salaActual);
+        // Capturar salaActual en variable local para evitar race conditions en callbacks
+        const salaIdDesconexion = salaActual;
+        log('INFO', 'Socket disconnected', { socketId: socket.id, reason, salaActual: salaIdDesconexion });
+        if (salaIdDesconexion) {
+            const sala = salas.get(salaIdDesconexion);
             if (sala) {
                 const jugadorDesconectado = sala.users.get(socket.id);
                 const nombreJugador = jugadorDesconectado ? jugadorDesconectado.nombre : 'Jugador';
                 
                 // Grace period solo si el juego está en marcha con 4 jugadores (no en sala de espera)
                 if (sala.juegoIniciado && sala.users.size === 4 && jugadorDesconectado) {
-                    const key = `${nombreJugador}::${salaActual}`;
+                    const key = `${nombreJugador}::${salaIdDesconexion}`;
                     const timeoutId = setTimeout(() => {
+                        const guardado = jugadoresDesconectados.get(key);
+                        // Si el jugador ya fue reconectado, no hacer nada
+                        if (guardado && guardado.reconectado) {
+                            console.log(`✅ ${nombreJugador} ya fue reconectado, ignorando timeout de grace period`);
+                            jugadoresDesconectados.delete(key);
+                            return;
+                        }
                         // Grace period expirado: eliminar jugador definitivamente
                         jugadoresDesconectados.delete(key);
-                        const salaAun = salas.get(salaActual);
-                        if (salaAun && salaAun.users.has(socket.id)) {
-                            salaAun.users.delete(socket.id);
-                            io.to(salaActual).emit("jugador_abandono", {
-                                socketId: socket.id,
-                                nombre: nombreJugador,
-                                mensaje: `${nombreJugador} ha abandonado el juego`
-                            });
-                            io.emit("salas_actualizado", { salaId: salaActual, contador: salaAun.users.size });
-                            eliminarBotsDeSala(salaAun);
-                            if (salaAun.juegoIniciado && salaAun.users.size < 4) {
-                                salaAun.juegoIniciado = false;
-                                salaAun.cartasRonda = [];
-                                salaAun.cartitasRonda = [];
-                                salaAun.ultimaCarta = null;
-                                salaAun.todos_limpian = 0;
-                                salaAun.turnoActual = 0;
-                                salaAun.ordenJugadores = [];
-                                io.to(salaActual).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
-                            }
-                            if (salaAun.privada && salaAun.users.size === 0) {
-                                setTimeout(() => limpiarSalaPrivada(salaAun), 5000);
+                        const salaAun = salas.get(salaIdDesconexion);
+                        // Solo eliminar si el jugador aún no se ha reconectado (verificar por nombre)
+                        if (salaAun) {
+                            const jugadorAunEnSala = Array.from(salaAun.users.values()).find(
+                                j => j.nombre === nombreJugador
+                            );
+                            if (!jugadorAunEnSala) {
+                                // El jugador no está en la sala (no se reconectó), emitir abandono
+                                io.to(salaIdDesconexion).emit("jugador_abandono", {
+                                    socketId: socket.id,
+                                    nombre: nombreJugador,
+                                    mensaje: `${nombreJugador} ha abandonado el juego`
+                                });
+                                io.emit("salas_actualizado", { salaId: salaIdDesconexion, contador: salaAun.users.size });
+                                eliminarBotsDeSala(salaAun);
+                                if (salaAun.juegoIniciado && salaAun.users.size < 4) {
+                                    salaAun.juegoIniciado = false;
+                                    salaAun.cartasRonda = [];
+                                    salaAun.cartitasRonda = [];
+                                    salaAun.ultimaCarta = null;
+                                    salaAun.todos_limpian = 0;
+                                    salaAun.turnoActual = 0;
+                                    salaAun.ordenJugadores = [];
+                                    io.to(salaIdDesconexion).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
+                                }
+                                if (salaAun.privada && salaAun.users.size === 0) {
+                                    setTimeout(() => limpiarSalaPrivada(salaAun), 5000);
+                                }
                             }
                         }
                     }, 30000);
@@ -2061,12 +2084,13 @@ io.on('connection', (socket) => {
                     jugadoresDesconectados.set(key, {
                         datos: jugadorDesconectado,
                         socketIdAnterior: socket.id,
-                        salaId: salaActual,
-                        timeout: timeoutId
+                        salaId: salaIdDesconexion,
+                        timeout: timeoutId,
+                        reconectado: false  // Flag para race condition
                     });
                     
                     // Notificar al resto que está desconectado temporalmente
-                    io.to(salaActual).emit("jugador_desconectado_temp", {
+                    io.to(salaIdDesconexion).emit("jugador_desconectado_temp", {
                         nombre: nombreJugador,
                         mensaje: `${nombreJugador} se desconectó. Esperando reconexión (30s)...`
                     });
@@ -2077,7 +2101,7 @@ io.on('connection', (socket) => {
                 sala.users.delete(socket.id);
                 
                 // Notificar a todos que alguien abandonó
-                io.to(salaActual).emit("jugador_abandono", {
+                io.to(salaIdDesconexion).emit("jugador_abandono", {
                     socketId: socket.id,
                     nombre: nombreJugador,
                     mensaje: `${nombreJugador} ha abandonado el juego`
@@ -2085,13 +2109,13 @@ io.on('connection', (socket) => {
                 
                 // Notificar actualización de sala
                 const usersArray = Array.from(sala.users);
-                socket.to(salaActual).emit("actualizar_sala", {
-                    salaId: salaActual,
+                socket.to(salaIdDesconexion).emit("actualizar_sala", {
+                    salaId: salaIdDesconexion,
                     jugadores: usersArray,
                     contador: sala.users.size
                 });
                 // Notificar a TODOS los clientes (pantalla de salas) el nuevo contador
-                io.emit("salas_actualizado", { salaId: salaActual, contador: sala.users.size });
+                io.emit("salas_actualizado", { salaId: salaIdDesconexion, contador: sala.users.size });
                 
                 // Si el juego estaba iniciado y quedan menos de 4, terminar juego
                 eliminarBotsDeSala(sala);
@@ -2103,7 +2127,7 @@ io.on('connection', (socket) => {
                     sala.todos_limpian = 0;
                     sala.turnoActual = 0;
                     sala.ordenJugadores = [];
-                    io.to(salaActual).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
+                    io.to(salaIdDesconexion).emit("juego_terminado", "Un jugador abandonó. El juego ha terminado.");
                 }
                 
                 // Si la sala quedó vacía, reiniciar o eliminar (si es privada)
@@ -2290,13 +2314,17 @@ app.get('/api/admin/status', (req, res) => {
 
 // Keep-alive para evitar que Render reinicie por inactividad
 setInterval(() => {
-    log('DEBUG', 'Keep-alive ping', { 
-        uptime: process.uptime(), 
-        memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
-        activeSessions: activeSessions.size,
-        jugadoresDesconectados: jugadoresDesconectados.size,
-        botsActivos: botsActivos.size
-    });
+    try {
+        log('DEBUG', 'Keep-alive ping', { 
+            uptime: process.uptime(), 
+            memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
+            activeSessions: activeSessions.size,
+            jugadoresDesconectados: jugadoresDesconectados.size,
+            botsActivos: botsActivos.size
+        });
+    } catch (err) {
+        console.error('Error en keep-alive:', err.message);
+    }
 }, 60000); // Cada 60 segundos
 
 // Auto-ping HTTP para mantener Render despierto (WebSockets no cuentan como tráfico HTTP)
@@ -2312,7 +2340,8 @@ if (process.env.NODE_ENV === 'production') {
             timeout: 5000
         };
         
-        const req = http.request(options, (res) => {
+        const transport = selfPingUrl.protocol === 'https:' ? https : http;
+        const req = transport.request(options, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
