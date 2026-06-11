@@ -1196,6 +1196,26 @@ io.on('connection', (socket) => {
         
         socket.emit("bots_desactivados", { cantidad: botsEliminados });
     });
+
+    // Evento para salir de una sala (emitido por Android al volver a la pantalla de salas)
+    socket.on("salir_sala", () => {
+        if (!salaActual) return;
+        const sala = salas.get(salaActual);
+        if (sala && !sala.juegoIniciado) {
+            sala.users.delete(socket.id);
+            socket.to(salaActual).emit("jugador_salio", socket.id);
+            const usersArray = Array.from(sala.users);
+            io.to(salaActual).emit("actualizar_sala", {
+                salaId: salaActual,
+                jugadores: usersArray,
+                contador: sala.users.size
+            });
+            io.emit("salas_actualizado", { salaId: salaActual, contador: sala.users.size });
+            log('INFO', 'salir_sala', { socketId: socket.id, salaId: salaActual });
+        }
+        socket.leave(salaActual);
+        salaActual = null;
+    });
     
     // Función para iniciar juego en una sala
     function iniciarJuego(sala) {
