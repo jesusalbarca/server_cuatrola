@@ -214,6 +214,13 @@ const jugadoresDesconectados = new Map();
 // Sesiones activas: Clave: userId, Valor: token
 const activeSessions = new Map();
 
+// ===== SISTEMA DE HEARTBEAT =====
+// Mapa para trackear último heartbeat de cada socket (para detectar desconexiones abruptas)
+const lastHeartbeat = new Map(); // socketId -> timestamp
+const HEARTBEAT_INTERVAL = 15000; // Enviar ping cada 15 segundos
+const HEARTBEAT_TIMEOUT = 45000; // Considerar muerto si no responde en 45 segundos
+const ORPHAN_CHECK_INTERVAL = 60000; // Revisar salas huérfanas cada 60 segundos
+
 // Función global para validar jugadas (disponible para bots y jugadores)
 function validarJugadaGlobal(sala, jugador, carta) {
     const jugadorData = sala.users.get(jugador);
@@ -1104,9 +1111,27 @@ io.on('connection', (socket) => {
     log('INFO', 'Socket connected', { socketId: socket.id, transport: socket.conn.transport.name });
     let salaActual = null;
     
+    // Registrar heartbeat inicial
+    lastHeartbeat.set(socket.id, Date.now());
+    
     // Log de IP (útil para debugging)
     const clientIp = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address;
     log('DEBUG', 'Client IP', { socketId: socket.id, ip: clientIp });
+    
+    // ===== HEARTBEAT HANDLERS =====
+    socket.on('pong', () => {
+        lastHeartbeat.set(socket.id, Date.now());
+    });
+    
+    // Enviar ping periódicamente para detectar conexiones muertas
+    const pingInterval = setInterval(() => {
+        if (socket.connected) {
+            socket.emit('ping');
+        }
+    }, HEARTBEAT_INTERVAL);
+    
+    // Almacenar intervalo para limpiar en disconnect
+    socket._pingInterval = pingInterval;
 
     // Enviar estado actual de salas públicas al cliente recién conectado
     salas.forEach((sala, salaId) => {
@@ -2027,6 +2052,13 @@ io.on('connection', (socket) => {
 
     // Desconexión
     socket.on("disconnect", (reason) => {
+        // Limpiar intervalo de ping
+        if (socket._pingInterval) {
+            clearInterval(socket._pingInterval);
+        }
+        // Limpiar heartbeat del jugador
+        lastHeartbeat.delete(socket.id);
+        
         // Capturar salaActual en variable local para evitar race conditions en callbacks
         const salaIdDesconexion = salaActual;
         log('INFO', 'Socket disconnected', { socketId: socket.id, reason, salaActual: salaIdDesconexion });
@@ -2386,6 +2418,144 @@ process.on('SIGTERM', () => {
         process.exit(0);
     });
 });
+
+// ===== SISTEMA DE LIMPIEZA DE SALAS HUÉRFANAS =====
+// Función para verificar si una sala solo tiene bots
+function salaSoloTieneBots(sala) {
+    for (const [_, jugador] of sala.users) {
+        if (!jugador.esBot) {
+            return false;
+        }
+    }
+    return sala.users.size > 0;
+}
+
+// Función para verificar si hay jugadores reales conectados (no bots)
+function salaTieneJugadoresReales(sala) {
+    for (const [_, jugador] of sala.users) {
+        if (!jugador.esBot) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Función para eliminar completamente una sala pública
+function resetearSalaPublica(sala) {
+    log('INFO', 'Reseteando sala pública', { salaId: sala.id, jugadores: sala.users.size });
+    eliminarBotsDeSala(sala);
+    sala.users.clear();
+    sala.juegoIniciado = false;
+    sala.juegoActivo = false;
+    sala.cartasRonda = [];
+    sala.cartitasRonda = [];
+    sala.ultimaCarta = null;
+    sala.todos_limpian = 0;
+    sala.turnoActual = 0;
+    sala.ordenJugadores = [];
+    sala.puntosRondaEquipoA = 0;
+    sala.puntosRondaEquipoB = 0;
+    sala.equipoGanador = null;
+    sala.cartasGanadasEquipoA = [];
+    sala.cartasGanadasEquipoB = [];
+    sala.bazasJugadasMano = 0;
+    sala.ganadorUltimaBaza = null;
+    sala.palosCantados = { A: [], B: [] };
+    io.emit("salas_actualizado", { salaId: sala.id, contador: 0 });
+}
+
+// Intervalo de limpieza de salas huérfanas
+setInterval(() => {
+    const ahora = Date.now();
+    log('DEBUG', 'Running orphan room cleanup', { salasCount: salas.size });
+    
+    salas.forEach((sala, salaId) => {
+        // Caso 1: Sala solo con bots (sin jugadores reales)
+        if (salaSoloTieneBots(sala)) {
+            log('INFO', 'Limpiando sala con solo bots', { salaId, bots: sala.users.size });
+            resetearSalaPublica(sala);
+            if (sala.privada) {
+                limpiarSalaPrivada(sala);
+            }
+            return;
+        }
+        
+        // Caso 2: Verificar jugadores que no responden al heartbeat
+        if (salaTieneJugadoresReales(sala)) {
+            const jugadoresMuertos = [];
+            for (const [socketId, jugador] of sala.users) {
+                if (jugador.esBot) continue;
+                
+                const ultimoHeartbeat = lastHeartbeat.get(socketId);
+                if (!ultimoHeartbeat || (ahora - ultimoHeartbeat > HEARTBEAT_TIMEOUT)) {
+                    jugadoresMuertos.push({ socketId, nombre: jugador.nombre });
+                }
+            }
+            
+            // Eliminar jugadores muertos
+            for (const { socketId, nombre } of jugadoresMuertos) {
+                log('INFO', 'Eliminando jugador sin heartbeat', { socketId, nombre, salaId });
+                sala.users.delete(socketId);
+                lastHeartbeat.delete(socketId);
+                
+                // Notificar a la sala
+                io.to(salaId).emit("jugador_abandono", {
+                    socketId: socketId,
+                    nombre: nombre,
+                    mensaje: `${nombre} se ha desconectado por inactividad`
+                });
+            }
+            
+            // Si quedan jugadores, actualizar estado
+            if (jugadoresMuertos.length > 0) {
+                io.emit("salas_actualizado", { salaId, contador: sala.users.size });
+                
+                // Si quedan solo bots, resetear sala
+                if (salaSoloTieneBots(sala)) {
+                    log('INFO', 'Sala quedó solo con bots tras limpieza', { salaId });
+                    resetearSalaPublica(sala);
+                    if (sala.privada) {
+                        limpiarSalaPrivada(sala);
+                    }
+                    return;
+                }
+                
+                // Si el juego estaba iniciado y ahora faltan jugadores, terminar
+                eliminarBotsDeSala(sala);
+                if (sala.juegoIniciado && sala.users.size < 4) {
+                    sala.juegoIniciado = false;
+                    sala.cartasRonda = [];
+                    sala.cartitasRonda = [];
+                    sala.ultimaCarta = null;
+                    sala.todos_limpian = 0;
+                    sala.turnoActual = 0;
+                    sala.ordenJugadores = [];
+                    io.to(salaId).emit("juego_terminado", "Un jugador abandonó por inactividad. El juego ha terminado.");
+                }
+                
+                // Notificar actualización de sala
+                const usersArray = Array.from(sala.users);
+                io.to(salaId).emit("actualizar_sala", {
+                    salaId: salaId,
+                    jugadores: usersArray,
+                    contador: sala.users.size
+                });
+            }
+        }
+        
+        // Caso 3: Sala vacía pero marcada como iniciada (inconsistencia)
+        if (sala.users.size === 0 && (sala.juegoIniciado || sala.juegoActivo)) {
+            log('INFO', 'Limpiando sala vacía inconsistente', { salaId });
+            sala.juegoIniciado = false;
+            sala.juegoActivo = false;
+            sala.cartasRonda = [];
+            sala.cartitasRonda = [];
+            sala.ultimaCarta = null;
+            sala.turnoActual = 0;
+            sala.ordenJugadores = [];
+        }
+    });
+}, ORPHAN_CHECK_INTERVAL);
 
 server.listen(PORT, async () => {
     log('INFO', 'Server started', { port: PORT, env: process.env.NODE_ENV || 'development', pid: process.pid });
