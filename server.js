@@ -4,7 +4,7 @@ import http from 'http'
 import https from 'https'
 import cors from 'cors'
 import morgan from 'morgan'
-import { register, login, getUserById, verifyToken, updateStats, resetStats, getLeaderboard, selectSkin, authMiddleware, ensureDefaultUsers } from './auth.js';
+import { register, login, getUserById, verifyToken, updateStats, resetStats, getLeaderboard, selectSkin, authMiddleware, ensureDefaultUsers, deleteAccount } from './auth.js';
 
 // Logger con timestamp para producción
 const timestamp = () => new Date().toISOString();
@@ -2314,6 +2314,18 @@ app.get('/api/leaderboard', async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const result = await getLeaderboard(limit);
     res.json(result);
+});
+
+// Eliminar cuenta (requiere autenticación)
+app.delete('/api/account', authMiddleware, async (req, res) => {
+    log('INFO', 'Delete account request', { userId: req.userId });
+    const result = await deleteAccount(req.userId);
+    if (result.success) {
+        activeSessions.delete(req.userId);
+        res.json({ success: true });
+    } else {
+        res.status(500).json(result);
+    }
 });
 
 // Health check

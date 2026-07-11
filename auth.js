@@ -236,6 +236,26 @@ export async function ensureDefaultUsers() {
     }
 }
 
+export async function deleteAccount(userId) {
+    // Eliminar estadísticas primero (foreign key)
+    const { error: statsError } = await supabase
+        .from('user_stats')
+        .delete()
+        .eq('user_id', userId);
+
+    if (statsError) return { success: false, error: 'Error eliminando estadísticas' };
+
+    // Eliminar usuario
+    const { error: userError } = await supabase
+        .from('users')
+        .delete()
+        .eq('id', userId);
+
+    if (userError) return { success: false, error: 'Error eliminando usuario' };
+
+    return { success: true };
+}
+
 export function authMiddleware(req, res, next) {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Token requerido' });
